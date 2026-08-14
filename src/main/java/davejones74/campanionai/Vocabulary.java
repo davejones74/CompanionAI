@@ -7,10 +7,14 @@ public class Vocabulary {
     private Map<Integer, String> idxToWord = new HashMap<>();
 
     public void build(String text) {
+        if (!wordToIdx.containsKey("<unk>")) {
+            wordToIdx.put("<unk>", 0);
+            idxToWord.put(0, "<unk>");
+        }
+        int index = wordToIdx.size();
         String[] tokens = text.split("\\s+");
-        int index = 0;
         for (String token : tokens) {
-            if (!wordToIdx.containsKey(token) && !token.isEmpty()) {
+            if (!token.isEmpty() && !wordToIdx.containsKey(token)) {
                 wordToIdx.put(token, index);
                 idxToWord.put(index, token);
                 index++;

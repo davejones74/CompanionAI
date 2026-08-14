@@ -9,7 +9,6 @@ import jakarta.servlet.http.Part;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
@@ -21,6 +20,13 @@ public class ModelServlet extends HttpServlet {
     private Vocabulary vocab;
     private MlpLanguageModel model;
     private Path dataDir;
+    private final ChatRules chat = new ChatRules();
+
+    private final int hiddenSize = Integer.getInteger("campanionai.hiddenSize", 512);
+    private final int contextWindow = Integer.getInteger("campanionai.contextWindow", 5);
+    private final double temperature = System.getProperty("campanionai.temperature") == null
+            ? 0.8
+            : Double.parseDouble(System.getProperty("campanionai.temperature"));
 
     @Override
     public void init() {
@@ -29,10 +35,7 @@ public class ModelServlet extends HttpServlet {
             dataDir = Path.of(base, "data").toAbsolutePath();
             Files.createDirectories(dataDir);
 
-            String greetings = loadResource("/greetings.txt");
-            List<String> corpus = new ArrayList<>();
-            corpus.add(greetings);
-            corpus.addAll(readStoredDocuments());
+            List<String> corpus = new ArrayList<>(readStoredDocuments());
 
             rebuildModel(corpus);
         } catch (Exception e) {
@@ -60,51 +63,73 @@ public class ModelServlet extends HttpServlet {
         }
         String text = all.toString();
         vocab.build(text);
-        model = new MlpLanguageModel(vocab.size(), 64);
+        model = new MlpLanguageModel(vocab.size(), hiddenSize, contextWindow);
         train(text);
     }
 
     private void train(String text) {
         String[] tokens = text.split("\\s+");
-        for (int i = 0; i < tokens.length - 1; i++) {
-            model.train(vocab.getIdx(tokens[i]), vocab.getIdx(tokens[i + 1]));
+        int[] idxs = new int[tokens.length];
+        for (int i = 0; i < tokens.length; i++) {
+            idxs[i] = vocab.getIdx(tokens[i]);
         }
+        for (int i = 0; i < idxs.length - 1; i++) {
+            model.train(makeContext(idxs, i), idxs[i + 1]);
+        }
+    }
+
+    private int[] makeContext(int[] idxs, int endIdx) {
+        int[] ctx = new int[contextWindow];
+        int fill = 0;
+        for (int p = Math.max(0, endIdx - contextWindow + 1); p <= endIdx; p++) {
+            ctx[fill++] = idxs[p];
+        }
+        return ctx;
     }
 
     private String respond(String input) {
         if (input == null || input.trim().isEmpty()) {
             return "Please type something first.";
         }
+        String greeting = chat.reply(input);
+        if (greeting != null) {
+            return greeting;
+        }
         String[] tokens = input.toLowerCase().split("\\s+");
-        int current = vocab.getIdx(tokens[tokens.length - 1]);
+        int[] idxs = new int[tokens.length];
+        for (int i = 0; i < tokens.length; i++) {
+            idxs[i] = vocab.getIdx(tokens[i]);
+        }
+        int[] context = makeContext(idxs, idxs.length - 1);
         StringBuilder reply = new StringBuilder();
         int generated = 0;
-        while (generated < 6) {
-            MlpForwardResult result = model.forward(current);
-            int next = argmax(result.probabilities);
-            if (next == current) {
+        String lastWord = "";
+        int repeats = 0;
+        while (generated < 8) {
+            int next = model.sampleIndex(context, temperature);
+            if (next == 0) {
                 break;
             }
             String word = vocab.getWord(next);
+            if (word.equals(lastWord)) {
+                repeats++;
+                if (repeats > 2) {
+                    break;
+                }
+            } else {
+                repeats = 0;
+            }
+            lastWord = word;
             reply.append(word).append(' ');
             generated++;
             if (word.endsWith(".")) {
                 break;
             }
-            current = next;
+            System.arraycopy(context, 1, context, 0, context.length - 1);
+            context[context.length - 1] = next;
         }
         String out = reply.toString().trim();
         return out.isEmpty() ? "I don't have a good answer for that yet." : out;
-    }
-
-    private int argmax(double[] probs) {
-        int best = 0;
-        for (int i = 1; i < probs.length; i++) {
-            if (probs[i] > probs[best]) {
-                best = i;
-            }
-        }
-        return best;
     }
 
     @Override
@@ -191,21 +216,16 @@ public class ModelServlet extends HttpServlet {
             html.append("<p><strong>").append(escape(status)).append("</strong></p>");
         }
 
-        html.append("<p>Current vocabulary size: ").append(vocab != null ? vocab.size() : 0).append("</p>")
+        html.append("<p>Vocabulary size: ").append(vocab != null ? vocab.size() : 0)
+            .append(" | Hidden: ").append(hiddenSize)
+            .append(" | Context: ").append(contextWindow)
+            .append(" | Temperature: ").append(temperature)
+            .append("</p>")
             .append("</body></html>");
         return html.toString();
     }
 
     private String escape(String s) {
         return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
-    }
-
-    private String loadResource(String path) throws IOException {
-        try (InputStream in = getClass().getResourceAsStream(path)) {
-            if (in == null) {
-                throw new IOException("Missing resource: " + path);
-            }
-            return new String(in.readAllBytes(), StandardCharsets.UTF_8);
-        }
     }
 }
