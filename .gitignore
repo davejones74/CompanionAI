@@ -1,0 +1,17 @@
+# Gradle
+.gradle/
+build/
+
+# IntelliJ IDEA
+.idea/
+*.iml
+
+# Uploaded training documents (runtime data)
+data/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
