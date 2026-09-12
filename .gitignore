@@ -15,3 +15,9 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Embedded Tomcat runtime dirs
+tomcat.*/
+
+# Source-controlled marker of the currently selected model
+script/current-model.txt

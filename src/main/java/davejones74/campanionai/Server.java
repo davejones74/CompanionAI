@@ -30,7 +30,10 @@ public class Server {
         wrapper.addMapping("/api/stats");
         wrapper.addMapping("/api/auth");
         wrapper.addMapping("/api/auth/logout");
+        wrapper.addMapping("/api/shutdown");
         wrapper.addMapping("/upload");
+
+        ctx.getServletContext().setAttribute("campanionai.tomcat", tomcat);
 
         if (authToken != null && !authToken.isBlank()) {
             FilterDef def = new FilterDef();

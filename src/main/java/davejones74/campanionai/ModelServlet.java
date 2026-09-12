@@ -542,7 +542,32 @@ public class ModelServlet extends HttpServlet {
         resp.setContentType("application/json; charset=UTF-8");
         String path = req.getRequestURI();
         try {
-            if (path.endsWith("/api/chat/stream")) {
+            if (path.endsWith("/api/shutdown")) {
+                String addr = req.getRemoteAddr();
+                boolean local = addr.startsWith("127.")
+                        || addr.equals("::1")
+                        || addr.equals("0:0:0:0:0:0:0:1");
+                if (!local) {
+                    resp.sendError(403, "Shutdown only allowed from localhost");
+                    return;
+                }
+                Object tomcatRef = getServletContext().getAttribute("campanionai.tomcat");
+                if (tomcatRef instanceof org.apache.catalina.startup.Tomcat t) {
+                    Thread stopper = new Thread(() -> {
+                        try {
+                            Thread.sleep(500);
+                            t.getServer().stop();
+                        } catch (Exception e) {
+                            System.err.println("Shutdown error: " + e.getMessage());
+                        }
+                    });
+                    stopper.setDaemon(true);
+                    stopper.start();
+                    resp.getWriter().write(json.writeValueAsString(Map.of("shutting", true)));
+                } else {
+                    resp.sendError(503, "Server reference unavailable");
+                }
+            } else if (path.endsWith("/api/chat/stream")) {
                 resp.setStatus(200);
                 handleStream(req, resp);
             } else if (path.endsWith("/api/chat")) {

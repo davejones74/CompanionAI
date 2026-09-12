@@ -67,6 +67,27 @@ Then open [http://localhost:8080/](http://localhost:8080/) in your browser.
 4. Documents you drop directly into the `data/` folder are picked up on the next
    startup.
 
+## Switching models
+
+One script per installed model lives in `script/` (Git Bash):
+
+```bash
+# Switch the active model and start the app with it
+./script/run-gemma4-12b.sh          # -> gemma4:12b
+./script/run-deepseek-r1-32b.sh     # -> deepseek-r1:32b
+```
+
+Each `run-*.sh` first calls `script/switch-model.sh <model>`, which verifies the
+model exists in Ollama (prints "Ollama is not running" or lists available models
+otherwise), records it in `script/current-model.txt`, and aborts on failure.
+On success the app is launched with that model via `campanionai.model`.
+
+To switch without launching, or for a model without a run script:
+
+```bash
+./script/switch-model.sh qwen2.5:14b
+```
+
 ## Configuration
 
 All settings are system properties with defaults:
@@ -138,7 +159,12 @@ data/                      # Knowledge base documents (created at runtime)
 | `/api/chat/stream`     | POST   | Server-Sent Events: `delta` / `status` / `error` / `done` |
 | `/api/stats`           | GET    | JSON usage statistics                               |
 | `/api/auth`            | POST   | Sign in (when auth enabled): `{"token": "..."}`     |
+| `/api/shutdown`        | POST   | Gracefully stop the server (localhost only)         |
 | `/upload`              | POST   | Multipart document upload → joins the knowledge base |
+
+To stop a running server, use `./gradlew shutdown` (works on any port via
+`-Dcampanionai.port`). It posts to the localhost-only `/api/shutdown` endpoint
+and stops the embedded Tomcat gracefully.
 
 ## Notes
 

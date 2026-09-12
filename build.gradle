@@ -28,3 +28,28 @@ dependencies {
 application {
     mainClass = 'davejones74.campanionai.Server'
 }
+
+tasks.register('shutdown') {
+    doLast {
+        def port = System.getProperty('campanionai.port', '8080')
+        def host = System.getProperty('campanionai.host', 'localhost')
+        if (host == '0.0.0.0') host = 'localhost'
+        def url = "http://${host}:${port}/api/shutdown"
+        try {
+            def conn = new URL(url).openConnection()
+            conn.requestMethod = 'POST'
+            conn.connectTimeout = 3000
+            conn.readTimeout = 30000
+            def code = conn.responseCode
+            if (code == 200) {
+                conn.inputStream.text
+                println "CompanionAI shut down: ${url}"
+            } else {
+                def body = conn.errorStream?.text ?: ''
+                println "Shutdown failed: HTTP ${code} ${body}"
+            }
+        } catch (Exception e) {
+            println "No running CompanionAI found at ${url} (already stopped?)"
+        }
+    }
+}
