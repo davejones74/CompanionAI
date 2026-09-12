@@ -1023,27 +1023,32 @@ function mdRender(src) {
     }
     if (t.indexOf('|') !== -1 && i + 1 < lines.length) {
       const sep = lines[i + 1].trim();
-      if (sep.indexOf('-') !== -1 && /^\\s*\\|?[\\s:\\-|]+\\|?\\s*$/.test(sep)) {
-        const header = mdRow(lines[i]);
-        const aligns = mdRow(sep).map(function (c) {
-          if (c.charAt(0) === ':' && c.charAt(c.length - 1) === ':') return 'center';
-          if (c.charAt(0) === ':') return 'left';
-          if (c.charAt(c.length - 1) === ':') return 'right';
-          return '';
-        });
-        i += 2;
+      const isSep = sep.indexOf('-') !== -1 && /^\\s*\\|?[\\s:\\-|]+\\|?\\s*$/.test(sep);
+      const header = mdRow(lines[i]);
+      if (isSep || header.length >= 3) {
+        const start = isSep ? i + 2 : i;
+        let j = start;
         const rows = [];
-        while (i < lines.length && lines[i].trim().indexOf('|') !== -1) { rows.push(mdRow(lines[i])); i++; }
-        const th = header.map(function (c, k) {
-          return '<th' + (aligns[k] ? ' style="text-align:' + aligns[k] + '"' : '') + '>' + mdInline(c) + '</th>';
-        }).join('');
-        const tr = rows.map(function (r) {
-          return '<tr>' + r.map(function (c, k) {
-            return '<td' + (aligns[k] ? ' style="text-align:' + aligns[k] + '"' : '') + '>' + mdInline(c) + '</td>';
-          }).join('') + '</tr>';
-        }).join('');
-        out.push('<table><thead><tr>' + th + '</tr></thead><tbody>' + tr + '</tbody></table>');
-        continue;
+        while (j < lines.length && lines[j].trim().indexOf('|') !== -1) { rows.push(mdRow(lines[j])); j++; }
+        if (isSep || rows.length > 0) {
+          const aligns = isSep ? mdRow(sep).map(function (c) {
+            if (c.charAt(0) === ':' && c.charAt(c.length - 1) === ':') return 'center';
+            if (c.charAt(0) === ':') return 'left';
+            if (c.charAt(c.length - 1) === ':') return 'right';
+            return '';
+          }) : [];
+          i = j;
+          const th = isSep ? header.map(function (c, k) {
+            return '<th' + (aligns[k] ? ' style="text-align:' + aligns[k] + '"' : '') + '>' + mdInline(c) + '</th>';
+          }).join('') : '';
+          const tr = rows.map(function (r) {
+            return '<tr>' + r.map(function (c, k) {
+              return '<td' + (aligns[k] ? ' style="text-align:' + aligns[k] + '"' : '') + '>' + mdInline(c) + '</td>';
+            }).join('') + '</tr>';
+          }).join('');
+          out.push('<table>' + (th ? '<thead><tr>' + th + '</tr></thead>' : '') + '<tbody>' + tr + '</tbody></table>');
+          continue;
+        }
       }
     }
     const ulm = t.match(/^([-*+])\\s+(.*)$/);
