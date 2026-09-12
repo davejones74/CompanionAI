@@ -1,30 +1,37 @@
 # CompanionAI
 
-A small Java web application that combines a simple Multi-Layer Perceptron
-(MLP) language model with a rule-based conversational layer, and lets you
-interact with it in a browser. This is a first attempt / learning project — an
-experiment in building something chat-like from scratch.
+A small Java web application that lets you chat with a local language model
+(Ollama) which is backed by a persistent, uploadable knowledge base of
+documents (`.txt`, `.docx`, `.pdf`).
 
 ## Features
 
-- **Rule-based conversational layer** (`ChatRules`): handles greetings,
-  identity, mood, jokes, knock-knock routines, small talk, live time/date, and
-  light arithmetic. Varied, randomised replies.
-- **MLP language model** (`MlpLanguageModel`) with ReLU activations, softmax
-  output, and backpropagation training, supporting:
-  - A **context window** (N-gram) so it learns short multi-token patterns.
-  - **Temperature-based sampling** for varied generation.
-- **Vocabulary** builder that maps tokens to indices (reserves an `<unk>` token).
-- **Embedded Tomcat** web server with a form for:
-  - Interacting with the model (type a message, get a predicted reply).
-  - Uploading training documents in **`.txt`, `.docx`, or `.pdf`** format.
-- **Document persistence**: training documents live in the `data/` folder and
-  are merged into the model on every startup, so your data survives restarts.
+- **Local LLM chat**: powered by Ollama (default model `qwen3.6:27b`), giving a
+  strong base level of conversational intelligence. Replies **stream** to the
+  page word-by-word as the model generates them, so responses feel instant.
+- **Document knowledge base**: documents in the `data/` folder are loaded on
+  startup. For each question, only the **most relevant** documents (keyword
+  scoring, default top 3) are injected into the model's context, so large
+  knowledge bases stay fast.
+- **Upload documents**: add `.txt`, `.docx`, or `.pdf` files through the web UI.
+  They are extracted to text, saved in `data/`, and immediately become part of
+  the knowledge base.
+- **Persistence**: uploaded documents live in the `data/` folder and survive
+  restarts — no re-training or degradation over time.
+- **Offline fallback**: if Ollama is unreachable, a small rule-based layer
+  (`ChatRules`) answers common greetings and small talk until the LLM is back.
+- **Polished chat UI**: scrollable chat history, multi-line input (4 rows,
+  auto-growing, cursor-resizable), thinking animation while waiting for a
+  reply, and subtle audio tones on send/reply.
+- **Embedded Tomcat** web server with JSON API (`/api/chat`, `/api/chat/stream`,
+  `/upload`).
 
 ## Requirements
 
 - JDK 26
 - Gradle (the included wrapper `gradlew.bat` is used)
+- **Ollama** running locally (default at `http://localhost:11434`) with a model
+  pulled, e.g. `ollama pull qwen3.6:27b`
 
 ## Build & Run
 
@@ -37,53 +44,60 @@ Then open [http://localhost:8080/](http://localhost:8080/) in your browser.
 
 ## Usage
 
-1. **Train**: upload a `.txt`, `.docx`, or `.pdf` document using the *Train*
-   form. The document is extracted, merged with the existing corpus, and the
-   model is re-trained. Vocabulary size is shown on the page.
-2. **Interact**: type a message in the *Interact* box and press *Send*. Common
-   greetings and small talk are answered by the rule layer; anything else falls
-   through to the MLP.
+1. **Chat**: type a message in the multi-line text area (4 rows, auto-growing)
+   and press **Send** (or *Enter*). Replies stream into a scrollable chat
+   history — you can scroll back to see earlier messages.
+2. **Upload**: the upload bar is pinned to the bottom of the screen at all
+   times. Choose a `.txt`, `.docx`, or `.pdf` file, press **Upload**, and it
+   immediately joins the knowledge base.
+3. Documents you drop directly into the `data/` folder are picked up on the next
+   startup.
 
-## Model configuration
+## Configuration
 
-The MLP is configurable via system properties:
+All settings are system properties with defaults:
 
-| Property                    | Default | Description                 |
-|-----------------------------|---------|-----------------------------|
-| `campanionai.hiddenSize`    | `512`   | Hidden layer size           |
-| `campanionai.contextWindow` | `5`     | Number of context tokens    |
-| `campanionai.temperature`   | `0.8`   | Sampling temperature        |
+| Property                  | Default                  | Description                     |
+|---------------------------|--------------------------|---------------------------------|
+| `campanionai.model`       | `qwen3.6:27b`            | Ollama model name               |
+| `campanionai.ollamaUrl`   | `http://localhost:11434` | Ollama base URL                 |
+| `campanionai.temperature` | `0.7`                    | Sampling temperature            |
+| `campanionai.maxDocs`     | `3`                      | Max docs injected per question  |
 
-Example: `./gradlew run -Dcampanionai.hiddenSize=1024`
+Example: `./gradlew run -Dcampanionai.model=deepseek-r1:latest`
 
 ## Project layout
 
 ```
 src/main/java/davejones74/campanionai/
 ├── Main.java              # Simple entry point
-├── Server.java            # Starts embedded Tomcat
-├── ModelServlet.java      # HTTP handler: form, upload, training, replies
-├── ChatRules.java         # Rule-based conversational layer
-├── DocumentReader.java    # Extracts text from .txt / .docx / .pdf
-├── MlpLanguageModel.java  # MLP with context window + temperature sampling
-└── Vocabulary.java        # Word <-> index mapping
-src/main/resources/        # Reserved for application properties / config
-data/                      # Training documents (created at runtime)
+├── Server.java            # Starts embedded Tomcat, maps URL routes
+├── ModelServlet.java      # HTTP handlers + embedded SPA HTML/CSS/JS
+├── LlmClient.java         # Thin HTTP client for the Ollama chat API
+├── ChatRules.java         # Rule-based offline fallback (LLM unavailable)
+└── DocumentReader.java    # Extracts text from .txt / .docx / .pdf
+src/main/resources/log4j2.xml   # Logging configuration (console)
+data/                      # Knowledge base documents (created at runtime)
 └── greetings.txt, exchanges.txt, formal.txt, casual.txt, farewells.txt,
     questions.txt          # Bundled greeting documents
 ```
 
 ## Notes
 
-- This is a **learning project, not a production LLM**. It has two parts:
-  1. A **rule engine** (`ChatRules`) that gives crisp, reliable replies for a
-     fixed set of intents — this is what makes "hello → hello" work.
-  2. An **MLP language model** that learns from uploaded documents but is a
-     statistical next-token predictor: it has no real understanding or
-     long-range reasoning, so its free-form output is often nonsense.
-- The model is an MLP (Multi-Layer Perceptron) using a short context window;
-  it is not a Transformer or a general-purpose language model.
-- Training documents live in `data/`, which is excluded from version control
-  via `.gitignore`. The bundled greeting documents live there too, so drop any
-  `.txt/.docx/.pdf` file into `data/` and it is picked up automatically on
-  restart.
+- The intelligence comes from a local LLM via Ollama, not from code. The Java
+  side is a thin HTTP client plus a document loader — swapping the model is a
+  one-line config change (`campanionai.model`).
+- The browser UI is a single-page app: chat uses streaming `fetch` over
+  Server-Sent Events (`/api/chat/stream`), so tokens render as they arrive and
+  the chat history persists without a full reload. Audio tones are generated
+  using the Web Audio API (no audio files required) — tones play on send and
+  again when a reply completes.
+- Since the knowledge base is scored per question, uploading large documents no
+  longer slows down every request — only the docs that match your message (up
+  to `campanionai.maxDocs`) are sent to the model.
+- This project began as a learning exercise (a from-scratch MLP language model
+  and a rule engine). Those have been replaced by the Ollama-backed approach;
+  `ChatRules` remains only as an offline fallback.
+- Knowledge-base documents live in `data/`, which is excluded from version
+  control via `.gitignore`. Any `.txt/.docx/.pdf` dropped there is loaded on
+  startup.

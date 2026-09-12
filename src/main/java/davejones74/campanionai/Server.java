@@ -19,6 +19,9 @@ public class Server {
         wrapper.setMultipartConfigElement(new jakarta.servlet.MultipartConfigElement(
                 new File(docBase).getAbsolutePath(), 10 * 1024 * 1024, 12 * 1024 * 1024, 0));
         wrapper.addMapping("/");
+        wrapper.addMapping("/api/chat");
+        wrapper.addMapping("/api/chat/stream");
+        wrapper.addMapping("/upload");
 
         tomcat.start();
         System.out.println("CompanionAI running at http://localhost:8080/");
