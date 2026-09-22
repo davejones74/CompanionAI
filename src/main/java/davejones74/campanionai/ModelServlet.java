@@ -310,7 +310,9 @@ public class ModelServlet extends HttpServlet {
         StringBuilder sb = new StringBuilder();
         sb.append("You are CompanionAI, a friendly and helpful chat assistant. ")
           .append("You have a knowledge base of documents provided below. ")
-          .append("Use them to answer the user's questions where relevant, but keep replies natural and conversational.");
+          .append("Use them to answer the user's questions where relevant, but keep replies natural and conversational. ")
+          .append("When you include mathematics, write it in LaTeX using $...$ for inline and $$...$$ (or \\[...\\] blocks)"
+                  .concat(" for display; the chat window renders these as formatted math."));
         if (used.isEmpty()) {
             sb.append("\n\n(No documents in the knowledge base were relevant to this question.)");
         } else {
@@ -828,6 +830,29 @@ main {
 .bubble table { border-collapse: collapse; margin: 8px 0; font-size: 13.5px; min-width: 60%; }
 .bubble th, .bubble td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; }
 .bubble th { background: rgba(61,90,254,.08); font-weight: 600; }
+.bubble .math {
+  font-family: "Cambria Math", "STIX Two Math", "DejaVu Math TeX Gyre", "Times New Roman", serif;
+  white-space: nowrap;
+}
+.bubble .math-block {
+  display: block;
+  text-align: center;
+  margin: 10px 0;
+  font-family: "Cambria Math", "STIX Two Math", "DejaVu Math TeX Gyre", "Times New Roman", serif;
+  overflow-x: auto;
+  white-space: nowrap;
+}
+.frac {
+  display: inline-flex;
+  flex-direction: column;
+  vertical-align: -0.6em;
+  text-align: center;
+  margin: 0 3px;
+}
+.frac .num { padding: 0 4px 2px; border-bottom: 1px solid currentColor; }
+.frac .den { padding: 2px 4px 0; }
+.bubble sup, .bubble sub { line-height: 1; }
+.mtext { font-style: italic; }
 .bubble a { color: var(--primary); word-break: break-all; }
 footer {
   background: var(--panel);
@@ -1081,12 +1106,153 @@ function mdInline(s) {
 function mdRow(l) {
   return l.trim().replace(/^\\|/, '').replace(/\\|$/, '').split('|').map(function (c) { return c.trim(); });
 }
+const MATH_SYMS = {
+  alpha:'α', beta:'β', gamma:'γ', Gamma:'Γ', delta:'δ', Delta:'Δ', epsilon:'ε', varepsilon:'ε',
+  zeta:'ζ', eta:'η', theta:'θ', Theta:'Θ', lambda:'λ', Lambda:'Λ', mu:'μ', nu:'ν', xi:'ξ',
+  pi:'π', Pi:'Π', rho:'ρ', sigma:'σ', Sigma:'Σ', tau:'τ', upsilon:'υ', phi:'φ', Phi:'Φ',
+  psi:'ψ', Psi:'Ψ', chi:'χ', omega:'ω', Omega:'Ω',
+  partial:'∂', nabla:'∇', sum:'∑', prod:'∏', int:'∫', infty:'∞',
+  odot:'⊙', otimes:'⊗', oplus:'⊕', cdot:'·', times:'×', pm:'±', mp:'∓',
+  to:'→', rightarrow:'→', leftarrow:'←', rightleftharpoons:'⇌',
+  in:'∈', notin:'∉', subset:'⊂', subseteq:'⊆', supset:'⊃', supseteq:'⊇',
+  cup:'∪', cap:'∩', approx:'≈', propto:'∝', equiv:'≡', sim:'∼', ne:'≠', le:'≤', ge:'≥',
+  ldots:'…', cdots:'⋯', prime:'′', ell:'ℓ', top:'⊤', bot:'⊥', neg:'¬', and:'∧', or:'∨',
+  nonumber:'', quad:' ', qquad:'  ', circ:'°'
+};
+function mathReadGroup(s, i) {
+  if (s.charAt(i) !== '{') return null;
+  let depth = 0;
+  for (let j = i; j < s.length; j++) {
+    if (s.charAt(j) === '{') depth++;
+    else if (s.charAt(j) === '}') {
+      depth--;
+      if (depth === 0) return { inner: s.slice(i + 1, j), end: j + 1 };
+    }
+  }
+  return null;
+}
+function renderMath(s) {
+  s = String(s).replace(/\\s+/g, ' ').trim();
+  let out = '';
+  let i = 0;
+  while (i < s.length) {
+    const c = s.charAt(i);
+    if (c === '\\\\') {
+      const m = s.slice(i).match(/^\\\\([a-zA-Z]+)/);
+      if (!m) {
+        if (s.charAt(i + 1) === '\\\\') { out += ' '; i += 2; continue; }
+        out += s.charAt(i + 1) || '';
+        i += 2; continue;
+      }
+      const cmd = m[1];
+      let k = i + m[0].length;
+      if (cmd === 'frac' || cmd === 'dfrac') {
+        const a = mathReadGroup(s, k);
+        if (!a) { out += cmd; i = k; continue; }
+        const b = mathReadGroup(s, a.end);
+        if (!b) { out += cmd; i = k; continue; }
+        out += '<span class="frac"><span class="num">' + renderMath(a.inner) + '</span><span class="den">' + renderMath(b.inner) + '</span></span>';
+        i = b.end; continue;
+      }
+      if (cmd === 'sqrt') {
+        const g = mathReadGroup(s, k);
+        if (g) { out += '√(' + renderMath(g.inner) + ')'; i = g.end; continue; }
+        out += '√'; i = k; continue;
+      }
+      if (cmd === 'left' || cmd === 'right' || cmd === 'big' || cmd === 'Big' ||
+          cmd === 'bigl' || cmd === 'bigr' || cmd === 'biggl' || cmd === 'biggr') {
+        i = k + 1; continue;
+      }
+      if (cmd === 'rm' || cmd === 'it' || cmd === 'bf' || cmd === 'cal') { i = k; continue; }
+      if (cmd === 'tag' || cmd === 'text' || cmd === 'mathrm' || cmd === 'textrm') {
+        const g = mathReadGroup(s, k);
+        if (g) {
+          const inner = renderMath(g.inner);
+          out += cmd === 'tag' ? '<span class="mtext">(' + inner + ')</span>' : '<span class="mtext">' + inner + '</span>';
+          i = g.end; continue;
+        }
+        i = k; continue;
+      }
+      if (MATH_SYMS[cmd] !== undefined) { out += MATH_SYMS[cmd]; i = k; continue; }
+      out += cmd; i = k; continue;
+    }
+    if (c === '^' || c === '_') {
+      const up = c === '^';
+      const t = s.charAt(i + 1);
+      let content, end;
+      if (t === '{') {
+        const g = mathReadGroup(s, i + 1);
+        if (!g) { content = '{'; end = i + 1; }
+        else { content = g.inner; end = g.end; }
+      } else { content = t === '' ? '' : t; end = i + 1 + content.length; }
+      out += '<' + (up ? 'sup' : 'sub') + '>' + renderMath(content) + '</' + (up ? 'sup' : 'sub') + '>';
+      i = end; continue;
+    }
+    if (c === '{') {
+      const g = mathReadGroup(s, i);
+      if (!g) { out += '{'; i++; continue; }
+      out += renderMath(g.inner); i = g.end; continue;
+    }
+    if (c === '}') { i++; continue; }
+    if (c === '&') { out += ' '; i++; continue; }
+    if (c === '<') { out += '&lt;'; i++; continue; }
+    if (c === '>') { out += '&gt;'; i++; continue; }
+    out += c; i++;
+  }
+  return out;
+}
+function mathify(src, maths) {
+  const stash = function (html, inline) {
+    maths.push({ html: html, block: !inline });
+    return '@@M' + (maths.length - 1) + (inline ? 'i' : 'b') + '@@';
+  };
+  const lines = String(src).split('\\n');
+  const res = [];
+  let open = false, buf = [];
+  const applyMath = function (t) {
+    t = t.replace(/\\$\\$([\\s\\S]+?)\\$\\$/g, function (m, g) {
+      return stash('<span class="math-block">' + renderMath(g) + '</span>', false);
+    });
+    t = t.replace(/\\\\\\[([\\s\\S]+?)\\\\\\]/g, function (m, g) {
+      return stash('<span class="math-block">' + renderMath(g) + '</span>', false);
+    });
+    t = t.replace(/\\\\begin\\{(?:eqnarray|equation)\\}([\\s\\S]+?)\\\\end\\{(?:eqnarray|equation)\\}/g, function (m, g) {
+      return stash('<span class="math-block">' + renderMath(g) + '</span>', false);
+    });
+    t = t.replace(/\\\\\\(([\\s\\S]+?)\\\\\\)/g, function (m, g) {
+      return stash('<span class="math">' + renderMath(g) + '</span>', true);
+    });
+    t = t.replace(/\\$([^\\n$]+?)\\$/g, function (m, g) {
+      return stash('<span class="math">' + renderMath(g) + '</span>', true);
+    });
+    return t;
+  };
+  const flush = function () {
+    if (!buf.length) return;
+    res.push(applyMath(buf.join('\\n')));
+    buf = [];
+  };
+  for (let li = 0; li < lines.length; li++) {
+    const t = lines[li].trim();
+    if (!open && /^```/.test(t)) { flush(); res.push(lines[li]); open = true; continue; }
+    if (open && /^```/.test(t)) { res.push(lines[li]); open = false; continue; }
+    if (open) { res.push(lines[li]); continue; }
+    if (t === '') { flush(); res.push(''); continue; }
+    buf.push(lines[li]);
+  }
+  flush();
+  return res.join('\\n');
+}
 function mdRender(src) {
-  const lines = esc(String(src)).replace(/\\r\\n?/g, '\\n').split('\\n');
+  const maths = [];
+  const processed = mathify(src, maths);
+  const lines = esc(processed).replace(/\\r\\n?/g, '\\n').split('\\n');
   const out = [];
   let i = 0;
   while (i < lines.length) {
     const t = lines[i].trim();
+    const bm = t.match(/^@@M(\\d+)b@@$/);
+    if (bm) { out.push(maths[Number(bm[1])].html); i++; continue; }
     const fence = t.match(/^```([\\w-]*)\\s*$/);
     if (fence) {
       i++;
@@ -1165,7 +1331,7 @@ function mdRender(src) {
     }
     out.push('<p>' + buf.map(mdInline).join(' ') + '</p>');
   }
-  return out.join('');
+  return out.join('').replace(/@@M(\\d+)[bi]@@/g, function (m, k) { return maths[Number(k)].html; });
 }
 function addMsg(role, text, offline) {
   if (emptyHint) { emptyHint.remove(); emptyHint = null; }
