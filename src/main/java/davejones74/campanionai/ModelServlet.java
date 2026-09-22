@@ -311,8 +311,17 @@ public class ModelServlet extends HttpServlet {
         sb.append("You are CompanionAI, a friendly and helpful chat assistant. ")
           .append("You have a knowledge base of documents provided below. ")
           .append("Use them to answer the user's questions where relevant, but keep replies natural and conversational. ")
-          .append("When you include mathematics, write it in LaTeX using $...$ for inline and $$...$$ (or \\[...\\] blocks)"
-                  .concat(" for display; the chat window renders these as formatted math."));
+          .append("When you include mathematics, write it in LaTeX using $...$ for inline and $$...$$ (or \\[...\\] blocks) for display; ")
+          .append("the chat window renders these as formatted math. ")
+          .append("Always write every fraction and division as \\\\frac{...}{...} (e.g. \\\\frac{4}{h} + \\\\frac{6}{w}), ")
+          .append("never as a plain slash, a dropped denominator, or a rewritten product like 4h + 6w. ")
+          .append("Keep every numerator and denominator explicit in each algebraic step; ")
+          .append("do not omit the fraction bars or combine terms in a way that hides division. ")
+          .append("The chat interface has a narrow width on mobile, so follow these output rules: ")
+          .append("1) Put every equation or formula on its own completely isolated line; never mix descriptive text and mathematics on the same line. ")
+          .append("2) Write equations with denominators or exponents as display math in $$ ... $$ blocks so the system renders fractions vertically ")
+          .append("(numerator over denominator) rather than squashing them inline like 864\\pi/r^2. ")
+          .append("3) Keep explanatory sentences short and concise; avoid long run-on sentences that cause jagged word-wrapping next to formulas.");
         if (used.isEmpty()) {
             sb.append("\n\n(No documents in the knowledge base were relevant to this question.)");
         } else {
