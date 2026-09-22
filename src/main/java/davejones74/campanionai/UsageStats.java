@@ -14,6 +14,8 @@ public final class UsageStats {
     private final AtomicLong fetchErrors = new AtomicLong();
     private final AtomicLong inputTokens = new AtomicLong();
     private final AtomicLong outputTokens = new AtomicLong();
+    private final AtomicLong liveAttempts = new AtomicLong();
+    private final AtomicLong liveFailures = new AtomicLong();
 
     private long latencySumMs;
     private long latencyCount;
@@ -53,6 +55,14 @@ public final class UsageStats {
         outputTokens.addAndGet(n);
     }
 
+    public void recordLiveAttempt() {
+        liveAttempts.incrementAndGet();
+    }
+
+    public void recordLiveFailure() {
+        liveFailures.incrementAndGet();
+    }
+
     public void recordLatency(long elapsedMs, long outTokens) {
         synchronized (latencyLock) {
             latencySumMs += elapsedMs;
@@ -80,6 +90,8 @@ public final class UsageStats {
                         .put("fetchErrors", fetchErrors.get())
                         .put("inputTokens", inputTokens.get())
                         .put("outputTokens", outputTokens.get())
+                        .put("liveAttempts", liveAttempts.get())
+                        .put("liveFailures", liveFailures.get())
                         .put("avgLatencyMs", latencyCount == 0 ? 0 : latencySumMs / latencyCount)
                         .put("lastLatencyMs", lastLatencyMs)
                         .put("lastOutputTokens", lastOutputTokens));

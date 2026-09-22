@@ -37,6 +37,12 @@ documents (`.txt`, `.docx`, `.pdf`) and **web articles**.
   reply, and subtle audio tones on send/reply.
 - **Embedded Tomcat** web server with JSON API (`/api/chat`, `/api/chat/stream`,
   `/api/stats`, `/upload`).
+- **Live information retrieval**: the assistant can answer current-information
+  questions by pulling in **web search results** (Tavily), **weather** (Open-Meteo,
+  no key needed), or **football standings & fixtures** (API-Football). Retrieval
+  is best-effort: missing API keys or provider hiccups simply leave the model
+  answering from its own knowledge, with a short notice. Retrieved content is
+  treated as untrusted data and never stored in the knowledge base.
 
 ## Requirements
 
@@ -110,6 +116,15 @@ All settings are system properties with defaults:
 | `campanionai.maxUrlsPerMessage` | `1`       | Max URLs fetched per message                             |
 | `campanionai.maxFetchBytes` | `2097152`      | Max bytes fetched per page                               |
 | `campanionai.allowPrivateFetch` | `false`   | Allow fetching private/localhost URLs (SSRF guard)       |
+| `campanionai.live.enabled` | `true`    | Master switch for live information retrieval              |
+| `campanionai.live.intent` | `llm`      | Intent detection: `llm`, or `rules` for zero LLM latency  |
+| `campanionai.searchApiKey` | `''`      | Tavily API key (web search) — unset ⇒ web search off     |
+| `campanionai.sportsApiKey` | `''`      | API-Football key (football data) — unset ⇒ sports off    |
+| `campanionai.live.defaultLocation` | `''` | Default weather location (e.g. `Uxbridge, UK`)           |
+| `campanionai.live.webResults` | `5`      | Max web search results per query                          |
+| `campanionai.live.fetchPages` | `2`      | Max live web pages to fetch per search                    |
+| `campanionai.live.contextTokens` | `4000` | Token budget for injected live content                   |
+| `campanionai.sports.maxRequestsPerDay` | `100` | API-Football daily request cap                        |
 
 Examples:
 
@@ -119,6 +134,9 @@ Examples:
 # cloud deployment with a public address + access token
 ./gradlew run -Dcampanionai.host=0.0.0.0 -Dcampanionai.authToken=change-me \
   -Dcampanionai.allowPrivateFetch=false
+# live information: web search (Tavily), weather for Uxbridge, and football
+./gradlew run -Dcampanionai.searchApiKey=TVLY-xxxx -Dcampanionai.sportsApiKey=API-Football-xxxx \
+  -Dcampanionai.live.defaultLocation="Uxbridge, UK"
 ```
 
 ## Cloud hosting
@@ -143,7 +161,13 @@ src/main/java/davejones74/campanionai/
 ├── AuthFilter.java        # Optional token sign-in filter for cloud hosting
 ├── UsageStats.java        # Thread-safe usage counters exposed via /api/stats
 ├── ChatRules.java         # Rule-based offline fallback (LLM unavailable)
-└── DocumentReader.java    # Extracts text from .txt / .docx / .pdf
+├── DocumentReader.java    # Extracts text from .txt / .docx / .pdf
+├── Tokens.java            # Shared char-based token estimation
+├── retrieval/             # Live information retrieval (web/weather/sports)
+│   ├── RetrievalService.java   # Intent detection + provider dispatch
+│   ├── RuleIntentClassifier.java, LlmIntentClassifier.java
+│   ├── WebSearchProvider.java, WeatherProvider.java, SportsProvider.java
+│   └── ... core types (Intent, RetrievalKind, Freshness, HttpHelper, ...)
 src/main/resources/log4j2.xml   # Logging configuration (console)
 data/                      # Knowledge base documents (created at runtime)
 ├── *.txt / *.docx / *.pdf     # Your documents and bundled greetings
@@ -186,6 +210,11 @@ and stops the embedded Tomcat gracefully.
   as ordinary knowledge-base documents on restart.
 - Token estimates are approximate (chars ÷ 4); this is sufficient to keep
   prompts inside the window but is not a true tokenizer.
+- Live information retrieval (web/weather/sports) is **best-effort and never
+  blocking**: a question that can't be answered externally is simply answered
+  from the model's own knowledge, with a short notice. Content pulled in via the
+  live providers is injected into the prompt inside `<retrieved-content>` tags,
+  is treated as untrusted data, and is never persisted to `data/`.
 - This project began as a learning exercise (a from-scratch MLP language model
   and a rule engine). Those have been replaced by the Ollama-backed approach;
   `ChatRules` remains only as an offline fallback.

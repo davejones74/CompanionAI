@@ -22,7 +22,6 @@ public final class WebFetcher {
     }
 
     private final HttpClient http = HttpClient.newBuilder()
-            .followRedirects(HttpClient.Redirect.NORMAL)
             .connectTimeout(Duration.ofSeconds(10))
             .build();
     private final long maxBytes;
@@ -58,6 +57,16 @@ public final class WebFetcher {
     }
 
     public Page fetch(String rawUrl) throws IOException {
+        return fetch(rawUrl, 0);
+    }
+
+    private Page fetch(String rawUrl, int hops) throws IOException {
+        if (!isAllowed(rawUrl)) {
+            throw new IOException("URL not allowed (must be http/https and non-private): " + rawUrl);
+        }
+        if (hops > 5) {
+            throw new IOException("Too many redirects while fetching " + rawUrl);
+        }
         URI uri = URI.create(rawUrl);
         HttpRequest request = HttpRequest.newBuilder(uri)
                 .timeout(Duration.ofSeconds(30))
@@ -73,6 +82,15 @@ public final class WebFetcher {
             throw new IOException("Interrupted while fetching " + rawUrl, e);
         }
         int status = response.statusCode();
+        if (status >= 300 && status < 400) {
+            String location = response.headers().firstValue("Location").orElse(null);
+            try (InputStream ignored = response.body()) {
+            }
+            if (location == null) {
+                throw new IOException("Redirect without Location from " + rawUrl);
+            }
+            return fetch(uri.resolve(location).toString(), hops + 1);
+        }
         try (InputStream in = response.body()) {
             if (status != 200) {
                 throw new IOException("HTTP " + status + " while fetching " + rawUrl);
