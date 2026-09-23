@@ -53,6 +53,7 @@ public class ModelServlet extends HttpServlet {
     private final int chunkTokens = Integer.getInteger("campanionai.chunkTokens", 1500);
     private final int chunkOverlap = Integer.getInteger("campanionai.chunkOverlap", 200);
     private final int maxContextTokens = Integer.getInteger("campanionai.maxContextTokens", 20000);
+    private final Integer numCtx = Integer.getInteger("campanionai.numCtx");
     private final int historyTokens = Integer.getInteger("campanionai.historyTokens", 8000);
     private final int maxHistoryMessages = Integer.getInteger("campanionai.historyMessages", 40);
     private final int maxUrlsPerMessage = Integer.getInteger("campanionai.maxUrlsPerMessage", 1);
@@ -105,7 +106,7 @@ public class ModelServlet extends HttpServlet {
                     System.getProperty("user.dir") + File.separator + "data");
             dataDir = Path.of(base).toAbsolutePath();
             Files.createDirectories(dataDir);
-            llm = new LlmClient(model, ollamaUrl, temperature);
+            llm = new LlmClient(model, ollamaUrl, temperature, numCtx);
             retrieval = buildRetrieval();
             reloadDocuments();
             LOG.info("Knowledge base ready at {}. Loaded {} document(s).", dataDir, docCount());

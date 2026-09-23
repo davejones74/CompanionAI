@@ -103,6 +103,7 @@ All settings are system properties with defaults:
 | `campanionai.model`       | `qwen3.6:27b`    | Ollama model name                                        |
 | `campanionai.ollamaUrl`   | `http://localhost:11434` | Ollama base URL                                  |
 | `campanionai.temperature` | `0.7`            | Sampling temperature                                     |
+| `campanionai.numCtx`      | *(unset)*        | Ollama context window (`num_ctx`) for the model          |
 | `campanionai.dataDir`     | `./data`         | Knowledge base folder                                    |
 | `campanionai.host`        | `0.0.0.0`        | Bind address (cloud: leave as is)                        |
 | `campanionai.port`        | `8080`           | HTTP port                                                |

@@ -20,15 +20,29 @@ public class LlmClient {
     private final String model;
     private final String baseUrl;
     private final double temperature;
+    private final Integer numCtx;
     private final HttpClient http = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(10))
             .build();
     private final ObjectMapper mapper = new ObjectMapper();
 
     public LlmClient(String model, String baseUrl, double temperature) {
+        this(model, baseUrl, temperature, null);
+    }
+
+    public LlmClient(String model, String baseUrl, double temperature, Integer numCtx) {
         this.model = model;
         this.baseUrl = baseUrl;
         this.temperature = temperature;
+        this.numCtx = numCtx;
+    }
+
+    private com.fasterxml.jackson.databind.node.ObjectNode options() {
+        com.fasterxml.jackson.databind.node.ObjectNode node = mapper.createObjectNode().put("temperature", temperature);
+        if (numCtx != null) {
+            node.put("num_ctx", numCtx);
+        }
+        return node;
     }
 
     private String chatRequest(List<ChatMessage> messages, boolean stream) throws LlmException {
@@ -38,7 +52,7 @@ public class LlmClient {
                             .put("model", model)
                             .put("stream", stream)
                             .<com.fasterxml.jackson.databind.node.ObjectNode>set("messages", messagesJson(messages))
-                            .set("options", mapper.createObjectNode().put("temperature", temperature)));
+                            .set("options", options()));
 
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(baseUrl + "/api/chat"))
@@ -92,7 +106,7 @@ public class LlmClient {
                             .put("model", model)
                             .put("stream", true)
                             .<com.fasterxml.jackson.databind.node.ObjectNode>set("messages", messagesJson(messages))
-                            .set("options", mapper.createObjectNode().put("temperature", temperature)));
+                            .set("options", options()));
 
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(baseUrl + "/api/chat"))
