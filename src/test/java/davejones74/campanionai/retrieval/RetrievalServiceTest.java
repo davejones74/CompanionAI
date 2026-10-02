@@ -1,7 +1,7 @@
 package davejones74.campanionai.retrieval;
 
-import davejones74.campanionai.LlmClient;
 import davejones74.campanionai.Tokens;
+import davejones74.campanionai.llm.LlmMessage;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
@@ -16,7 +16,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class RetrievalServiceTest {
 
-    private static final List<LlmClient.ChatMessage> HISTORY = List.of();
+    private static final List<LlmMessage> HISTORY = List.of();
 
     private static final class StubClassifier implements IntentClassifier {
         final Optional<IntentClassification> result;
@@ -25,7 +25,7 @@ class RetrievalServiceTest {
             this.result = Optional.ofNullable(result);
         }
         @Override
-        public Optional<IntentClassification> classify(String input, List<LlmClient.ChatMessage> history) {
+        public Optional<IntentClassification> classify(String input, List<LlmMessage> history) {
             calls++;
             return result;
         }

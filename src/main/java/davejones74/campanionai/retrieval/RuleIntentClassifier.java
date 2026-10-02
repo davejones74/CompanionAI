@@ -1,6 +1,6 @@
 package davejones74.campanionai.retrieval;
 
-import davejones74.campanionai.LlmClient;
+import davejones74.campanionai.llm.LlmMessage;
 
 import java.util.List;
 import java.util.Locale;
@@ -44,7 +44,7 @@ public final class RuleIntentClassifier implements IntentClassifier {
             "who are you", "goodbye", "bye", "help me");
 
     @Override
-    public Optional<IntentClassification> classify(String input, List<LlmClient.ChatMessage> history) {
+    public Optional<IntentClassification> classify(String input, List<LlmMessage> history) {
         if (input == null || input.isBlank()) {
             return Optional.empty();
         }

@@ -1,6 +1,6 @@
 package davejones74.campanionai.retrieval;
 
-import davejones74.campanionai.LlmClient;
+import davejones74.campanionai.llm.LlmMessage;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -13,7 +13,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class RuleIntentClassifierTest {
 
     private final RuleIntentClassifier classifier = new RuleIntentClassifier();
-    private final List<LlmClient.ChatMessage> emptyHistory = List.of();
+    private final List<LlmMessage> emptyHistory = List.of();
 
     private IntentClassification classify(String input) {
         Optional<IntentClassification> c = classifier.classify(input, emptyHistory);

@@ -31,6 +31,10 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import davejones74.campanionai.llm.LlmException;
+import davejones74.campanionai.llm.LlmMessage;
+import davejones74.campanionai.llm.LlmProvider;
+import davejones74.campanionai.llm.LlmProviderFactory;
 import davejones74.campanionai.retrieval.LlmIntentClassifier;
 import davejones74.campanionai.retrieval.RetrievalKind;
 import davejones74.campanionai.retrieval.RetrievalProvider;
@@ -44,16 +48,13 @@ import davejones74.campanionai.retrieval.WebSearchProvider;
 public class ModelServlet extends HttpServlet {
     private final ChatRules chat = new ChatRules();
     private final ObjectMapper json = new ObjectMapper();
-    private LlmClient llm;
+    private LlmProvider llm;
     private Path dataDir;
 
-    private final String model = System.getProperty("campanionai.model", "qwen3.6:27b");
-    private final String ollamaUrl = System.getProperty("campanionai.ollamaUrl", "http://localhost:11434");
     private final int maxChunksPerDoc = Integer.getInteger("campanionai.maxDocs", 3);
     private final int chunkTokens = Integer.getInteger("campanionai.chunkTokens", 1500);
     private final int chunkOverlap = Integer.getInteger("campanionai.chunkOverlap", 200);
     private final int maxContextTokens = Integer.getInteger("campanionai.maxContextTokens", 20000);
-    private final Integer numCtx = Integer.getInteger("campanionai.numCtx");
     private final int historyTokens = Integer.getInteger("campanionai.historyTokens", 8000);
     private final int maxHistoryMessages = Integer.getInteger("campanionai.historyMessages", 40);
     private final int maxUrlsPerMessage = Integer.getInteger("campanionai.maxUrlsPerMessage", 1);
@@ -68,9 +69,6 @@ public class ModelServlet extends HttpServlet {
     private final int liveFetchPages = Integer.getInteger("campanionai.live.fetchPages", 2);
     private final int liveContextTokens = Integer.getInteger("campanionai.live.contextTokens", 4000);
     private final int sportsMaxPerDay = Integer.getInteger("campanionai.sports.maxRequestsPerDay", 100);
-    private final double temperature = System.getProperty("campanionai.temperature") == null
-            ? 0.7
-            : Double.parseDouble(System.getProperty("campanionai.temperature"));
 
     private final WebFetcher fetcher = new WebFetcher(maxFetchBytes, allowPrivateFetch);
     private final UsageStats stats = new UsageStats();
@@ -80,7 +78,7 @@ public class ModelServlet extends HttpServlet {
     private List<Doc> docs = new ArrayList<>();
     private List<Chunk> chunks = new ArrayList<>();
     private final Map<String, String> urlToFilename = new HashMap<>();
-    private final List<LlmClient.ChatMessage> history = new ArrayList<>();
+    private final List<LlmMessage> history = new ArrayList<>();
 
     private static final Pattern URL_PATTERN = Pattern.compile("https?://[^\\s<>()\"']+");
 
@@ -106,7 +104,7 @@ public class ModelServlet extends HttpServlet {
                     System.getProperty("user.dir") + File.separator + "data");
             dataDir = Path.of(base).toAbsolutePath();
             Files.createDirectories(dataDir);
-            llm = new LlmClient(model, ollamaUrl, temperature, numCtx);
+            llm = LlmProviderFactory.fromSystemProperties();
             retrieval = buildRetrieval();
             reloadDocuments();
             LOG.info("Knowledge base ready at {}. Loaded {} document(s).", dataDir, docCount());
@@ -405,23 +403,23 @@ public class ModelServlet extends HttpServlet {
         }
     }
 
-    private List<LlmClient.ChatMessage> buildMessages(String system, String input) {
+    private List<LlmMessage> buildMessages(String system, String input) {
         synchronized (history) {
-            List<LlmClient.ChatMessage> messages = new ArrayList<>();
-            messages.add(new LlmClient.ChatMessage("system", system));
+            List<LlmMessage> messages = new ArrayList<>();
+            messages.add(new LlmMessage("system", system));
             messages.addAll(history);
-            messages.add(new LlmClient.ChatMessage("user", input));
+            messages.add(new LlmMessage("user", input));
             return messages;
         }
     }
 
     private void appendHistory(String user, String assistant) {
         synchronized (history) {
-            history.add(new LlmClient.ChatMessage("user", user));
-            history.add(new LlmClient.ChatMessage("assistant", assistant));
+            history.add(new LlmMessage("user", user));
+            history.add(new LlmMessage("assistant", assistant));
             while (history.size() > 2) {
                 int total = 0;
-                for (LlmClient.ChatMessage m : history) total += estimateTokens(m.content());
+                for (LlmMessage m : history) total += estimateTokens(m.content());
                 if (total <= historyTokens && history.size() <= maxHistoryMessages) break;
                 history.remove(0);
                 history.remove(0);
@@ -452,7 +450,7 @@ public class ModelServlet extends HttpServlet {
             List<Chunk> ctx = selectContext(input, urls);
             String live = liveContext(input).promptBlock();
             String system = systemPrompt(ctx, live);
-            List<LlmClient.ChatMessage> messages = buildMessages(system, input);
+            List<LlmMessage> messages = buildMessages(system, input);
             stats.addInputTokens(estimateTokens(system) + estimateTokens(input));
             String reply = llm.chat(messages);
             stats.addOutputTokens(estimateTokens(reply));
@@ -460,7 +458,7 @@ public class ModelServlet extends HttpServlet {
             recordLatency(t0, estimateTokens(reply));
             appendHistory(input, reply);
             return new ChatResult(reply, false);
-        } catch (LlmClient.LlmException e) {
+        } catch (LlmException e) {
             stats.recordOffline();
             String fallback = chat.reply(input);
             if (fallback != null) {
@@ -510,7 +508,7 @@ public class ModelServlet extends HttpServlet {
             List<Chunk> ctx = selectContext(input, urls);
             String live = liveContext(input).promptBlock();
             String system = systemPrompt(ctx, live);
-            List<LlmClient.ChatMessage> messages = buildMessages(system, input);
+            List<LlmMessage> messages = buildMessages(system, input);
             stats.addInputTokens(estimateTokens(system) + estimateTokens(input));
             StringBuilder replyBuilder = new StringBuilder();
             boolean offline = false;
@@ -526,7 +524,7 @@ public class ModelServlet extends HttpServlet {
             } catch (StreamAbort e) {
                 LOG.debug("Stream aborted (client disconnected).");
                 return;
-            } catch (LlmClient.LlmException e) {
+            } catch (LlmException e) {
                 LOG.warn("LLM stream failed: {}", e.getMessage());
                 stats.recordOffline();
                 String fallback = chat.reply(input);
@@ -682,9 +680,9 @@ public class ModelServlet extends HttpServlet {
 
     private String page() {
         return PAGE
-                .replace("@@MODEL@@", escapeAttr(model))
+                .replace("@@MODEL@@", escapeAttr(llm.model()))
                 .replace("@@DOCS@@", String.valueOf(docCount()))
-                .replace("@@TEMP@@", String.valueOf(temperature));
+                .replace("@@TEMP@@", String.valueOf(llm.temperature()));
     }
 
     private String escapeAttr(String s) {

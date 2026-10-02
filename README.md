@@ -98,12 +98,35 @@ To switch without launching, or for a model without a run script:
 
 All settings are system properties with defaults:
 
+### LLM provider
+
+These keys are provider-neutral and take precedence over the legacy Ollama-only
+keys below. Each also has an environment-variable equivalent, looked up in the
+order system property → environment variable → default.
+
+| Property                    | Env var           | Default          | Description                                                        |
+|-----------------------------|-------------------|------------------|--------------------------------------------------------------------|
+| `companionai.llm.provider`  | `LLM_PROVIDER`    | `ollama`         | `ollama` or `fastflowlm`. An unknown value fails startup            |
+| `companionai.llm.model`     | `LLM_MODEL`       | `qwen3.6:27b`    | Model identifier sent to the runtime                               |
+| `companionai.llm.baseUrl`   | `LLM_BASE_URL`    | per provider     | Runtime root URL; `/v1/...` is appended                             |
+| `companionai.llm.temperature` | `LLM_TEMPERATURE` | `0.7`          | Sampling temperature                                               |
+| `companionai.llm.numCtx`    | `LLM_NUM_CTX`     | *(unset)*        | Context window. Ollama only; ignored with a warning elsewhere      |
+| `companionai.llm.think`     | `LLM_THINK`       | `false`          | `fastflowlm` only; enables reasoning output                        |
+
+> The default FastFlowLM base URL comes from vendor documentation and is
+> **not yet validated against real hardware**. Set `LLM_BASE_URL` explicitly
+> until it is confirmed — see `docs/X1Pro-FastFlowLM-Validation.md`.
+
+The legacy keys below still work unchanged for Ollama.
+
+### All other settings
+
 | Property                  | Default          | Description                                              |
 |---------------------------|------------------|----------------------------------------------------------|
-| `campanionai.model`       | `qwen3.6:27b`    | Ollama model name                                        |
-| `campanionai.ollamaUrl`   | `http://localhost:11434` | Ollama base URL                                  |
-| `campanionai.temperature` | `0.7`            | Sampling temperature                                     |
-| `campanionai.numCtx`      | *(unset)*        | Ollama context window (`num_ctx`) for the model          |
+| `campanionai.model`       | `qwen3.6:27b`    | Ollama model name (superseded by `companionai.llm.model`) |
+| `campanionai.ollamaUrl`   | `http://localhost:11434` | Ollama base URL (superseded by `companionai.llm.baseUrl`) |
+| `campanionai.temperature` | `0.7`            | Sampling temperature (superseded by `companionai.llm.temperature`) |
+| `campanionai.numCtx`      | *(unset)*        | Ollama context window (`num_ctx`) (superseded by `companionai.llm.numCtx`) |
 | `campanionai.dataDir`     | `./data`         | Knowledge base folder                                    |
 | `campanionai.host`        | `0.0.0.0`        | Bind address (cloud: leave as is)                        |
 | `campanionai.port`        | `8080`           | HTTP port                                                |
@@ -157,7 +180,8 @@ cloud box alongside Ollama. Recommended settings for a public instance:
 src/main/java/davejones74/campanionai/
 ├── Server.java            # Starts embedded Tomcat, maps URL routes, auth filter
 ├── ModelServlet.java      # HTTP handlers + embedded SPA HTML/CSS/JS
-├── LlmClient.java         # Thin HTTP client for the Ollama chat API
+├── llm/                   # Provider abstraction: LlmProvider, OllamaProvider,
+│                          #   FastFlowLmProvider, shared OpenAI-compatible transport
 ├── WebFetcher.java        # Fetches and extracts web articles (SSRF-guarded)
 ├── AuthFilter.java        # Optional token sign-in filter for cloud hosting
 ├── UsageStats.java        # Thread-safe usage counters exposed via /api/stats

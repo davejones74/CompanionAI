@@ -2,8 +2,9 @@ package davejones74.campanionai.retrieval;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import davejones74.campanionai.LlmClient;
 import davejones74.campanionai.Tokens;
+import davejones74.campanionai.llm.LlmMessage;
+import davejones74.campanionai.llm.LlmProvider;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -20,32 +21,32 @@ public final class LlmIntentClassifier implements IntentClassifier {
 
     private static final Pattern JSON_BLOCK = Pattern.compile("\\{.*?}", Pattern.DOTALL);
 
-    private final LlmClient llm;
+    private final LlmProvider llm;
     private final ObjectMapper json = new ObjectMapper();
     private final int historyTokens;
 
-    public LlmIntentClassifier(LlmClient llm) {
+    public LlmIntentClassifier(LlmProvider llm) {
         this(llm, 1500);
     }
 
-    public LlmIntentClassifier(LlmClient llm, int historyTokens) {
+    public LlmIntentClassifier(LlmProvider llm, int historyTokens) {
         this.llm = llm;
         this.historyTokens = Math.max(0, historyTokens);
     }
 
     @Override
-    public Optional<IntentClassification> classify(String input, List<LlmClient.ChatMessage> history) {
+    public Optional<IntentClassification> classify(String input, List<LlmMessage> history) {
         try {
-            List<LlmClient.ChatMessage> messages = new ArrayList<>();
-            messages.add(new LlmClient.ChatMessage("system", SYSTEM_PROMPT));
+            List<LlmMessage> messages = new ArrayList<>();
+            messages.add(new LlmMessage("system", SYSTEM_PROMPT));
             int used = 0;
-            for (LlmClient.ChatMessage m : history) {
+            for (LlmMessage m : history) {
                 int t = Tokens.estimate(m.content());
                 if (used + t > historyTokens) break;
                 messages.add(m);
                 used += t;
             }
-            messages.add(new LlmClient.ChatMessage("user", input));
+            messages.add(new LlmMessage("user", input));
             String reply = llm.chat(messages);
             return Optional.of(parse(reply));
         } catch (Exception e) {

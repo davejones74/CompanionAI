@@ -1,7 +1,7 @@
 package davejones74.campanionai.retrieval;
 
-import davejones74.campanionai.LlmClient;
 import davejones74.campanionai.Tokens;
+import davejones74.campanionai.llm.LlmMessage;
 
 import java.util.EnumMap;
 import java.util.List;
@@ -36,7 +36,7 @@ public final class RetrievalService {
         this.contextTokens = Math.max(256, contextTokens);
     }
 
-    public LiveContext supplement(String input, List<LlmClient.ChatMessage> history) {
+    public LiveContext supplement(String input, List<LlmMessage> history) {
         Optional<IntentClassification> classification = rules.classify(input, history);
         if (classification.isEmpty() && llmClassifier != null) {
             classification = llmClassifier.classify(input, history);
