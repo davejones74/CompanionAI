@@ -170,14 +170,33 @@ tagged reply with `offline=true`; coupling lifetimes would take the UI down inst
 
 Change this only if you prefer no UI at all to a UI that cannot answer.
 
-## 5. Nginx
+## 5. Nginx — bootstrap, then TLS
+
+The two halves of this config must be installed in order, and the order is forced by a
+dependency that runs in both directions. `companionai.conf` references a certificate that
+does not exist yet, and nginx treats a missing `ssl_certificate` as fatal — it will not
+start at all. certbot in turn cannot issue without port 80 already serving the challenge.
+Deploying only the HTTPS file first therefore guarantees the failure above.
+
+Install the cert-free half first:
+
+```bash
+sudo cp deploy/nginx/companionai-http.conf /etc/nginx/sites-available/companionai
+sudo ln -sf /etc/nginx/sites-available/companionai /etc/nginx/sites-enabled/
+ls -l /etc/nginx/sites-enabled/          # must be a symlink, not a regular file
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+Then issue the certificate (step 6), then swap in the HTTPS file:
 
 ```bash
 sudo cp deploy/nginx/companionai.conf /etc/nginx/sites-available/companionai
-sudo ln -s /etc/nginx/sites-available/companionai /etc/nginx/sites-enabled/
-sudo nginx -t
-sudo systemctl reload nginx
+sudo ln -sf /etc/nginx/sites-available/companionai /etc/nginx/sites-enabled/
+sudo nginx -t && sudo systemctl reload nginx
 ```
+
+`ln -sf` will not replace an existing regular file. If `sites-enabled/companionai` is a
+regular file rather than a symlink, `rm` it first.
 
 `proxy_buffering off` and `gzip off` are the load-bearing directives. With buffering on, Nginx reads
 the entire response before forwarding a byte, which converts a word-by-word stream into one lump
@@ -371,6 +390,18 @@ listen 443 ssl http2;
 A previous `certbot --nginx` run injected a challenge location next to the one already in
 `deploy/nginx/companionai.conf`. Delete the injected copy and use `--webroot` from step 6,
 which never touches the config.
+
+### `nginx: [emerg] cannot load certificate ... No such file or directory`
+
+Not a missing-certificate bug to fix with a dummy self-signed cert. It is the bootstrap
+ordering, and `companionai.conf` cannot be loaded until the certificate exists while certbot
+cannot run until port 80 is serving. Start from `companionai-http.conf` (step 5), which has
+no certificate dependency.
+
+Note that `nginx -t && systemctl reload` is what made this look worse than it was: when the
+test failed the reload never ran, so the running server still had no port 80 ACME location
+live. Check `systemctl status nginx` rather than assuming the config on disk is the config in
+memory.
 
 ## Rollback
 
