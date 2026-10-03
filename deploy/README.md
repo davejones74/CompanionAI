@@ -32,7 +32,28 @@ sudo usermod -aG video  fastflowlm
 
 sudo mkdir -p /var/lib/companionai/data
 sudo chown -R companionai:companionai /var/lib/companionai
+
+# State directory for the NPU runtime, and HOME for both services. Do not skip this:
+# --no-create-home still records /home/fastflowlm in passwd, so systemd sets HOME to a
+# path that does not exist and flm exits 1 on its first operation. See Troubleshooting.
+sudo mkdir -p /var/lib/fastflowlm
+sudo chown -R fastflowlm:fastflowlm /var/lib/fastflowlm
 ```
+
+### The model must exist as the service user
+
+`flm pull` run in your shell installs into *your* home. The service runs as
+`fastflowlm` with `HOME=/var/lib/fastflowlm`, so it looks in a different cache and will
+not find it. Populate the service user's cache once, with the service stopped:
+
+```bash
+sudo systemctl stop fastflowlm
+sudo -u fastflowlm -H flm pull qwen2.5-it:3b
+```
+
+This is the manual operator step from the network discussion. It is the only part of
+FastFlowLM's lifecycle that needs outbound network, which is why it is not automated in
+the unit.
 
 ## 2. Deploy the application
 
@@ -150,6 +171,44 @@ Confirm the runtime stayed private from an external host:
 ```bash
 curl -sS --max-time 5 http://<X1-PUBLIC-IP>:52625/v1/models    # must time out
 ```
+
+## Troubleshooting
+
+### `filesystem error: cannot create directories: Permission denied [/home/fastflowlm/.config/flm]`
+
+`User=fastflowlm` cannot create its own config directory. Cause is the account, not the
+unit's file permissions: `useradd --no-create-home` writes a passwd entry whose home is
+`/home/fastflowlm`, systemd exports that as `$HOME`, and the path does not exist and is
+not creatable by that user. `flm` fails its very first operation and systemd retries every
+10 seconds forever.
+
+Create the directory and point `HOME` at it, as in step 1. To see the real error without
+the restart loop:
+
+```bash
+sudo systemctl stop fastflowlm
+sudo -u fastflowlm env HOME=/var/lib/fastflowlm /usr/bin/flm serve --cors 0
+```
+
+### `Warning: could not raise memlock limit to 512 MB`
+
+XRT locks memory for the NPU. `LimitMEMLOCK=infinity` in the unit resolves it. It is only
+a warning, so if inference works end to end you can leave it, but do not assume the
+default is unlimited — it derives from `DefaultLimitMEMLOCK` in `systemd/system.conf`
+and is commonly 64K.
+
+### FastFlowLM restarts every 10 seconds
+
+`Restart=on-failure` with `RestartSec=10` is intentional, but it means a permanently
+fatal configuration error presents as an infinite loop rather than one clean failure.
+Read the actual cause once with `journalctl -u fastflowlm -n 20` instead of watching
+`systemctl status` scroll.
+
+### Model "not found" after fixing the home directory
+
+Expected once, and not a bug. `flm pull` as a normal user installs into that user's
+cache. Pull again as the service user (see step 1) or the runtime will start but every
+request will fail.
 
 ## Rollback
 

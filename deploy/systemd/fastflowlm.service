@@ -16,6 +16,20 @@ Type=simple
 User=fastflowlm
 Group=fastflowlm
 
+# Required, not cosmetic. `useradd --no-create-home` still records /home/fastflowlm in
+# passwd, so systemd sets HOME to a path that does not exist. flm then fails its very
+# first operation with:
+#   Error: filesystem error: cannot create directories:
+#   Permission denied [/home/fastflowlm/.config/flm]
+# and exits 1. This must point at a directory the user owns, created in README step 1.
+Environment=HOME=/var/lib/fastflowlm
+
+# XRT locks memory for the NPU. Without this, flm logs
+#   Warning: could not raise memlock limit to 512 MB
+# on every start, because the systemd default derives from DefaultLimitMEMLOCK, which is
+# commonly 64K rather than unlimited.
+LimitMEMLOCK=infinity
+
 # CORS off: the runtime is loopback-only and Nginx is the only public entry point.
 # Confirm the binary path on your host with:  command -v flm
 ExecStart=/usr/bin/flm serve --cors 0

@@ -22,6 +22,12 @@ User=companionai
 Group=companionai
 WorkingDirectory=/var/lib/companionai
 
+# Same reason as fastflowlm.service: --no-create-home leaves /home/companionai in
+# passwd, and any component that resolves $HOME to a missing path will fail. Tomcat
+# is more tolerant than flm, but pointing HOME at the existing state directory costs
+# nothing and removes the class of problem entirely.
+Environment=HOME=/var/lib/companionai
+
 # Read by systemd as root BEFORE privileges are dropped, so this file can and
 # should be root:root 0600. The service user does not need to read it.
 #
