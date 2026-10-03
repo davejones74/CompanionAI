@@ -2,7 +2,10 @@
 
 > ## ⚠ No row in this document is `[VALIDATED]`
 >
-> **Nothing here has been run.** Every command is untested against real hardware and every value is
+> **Previous drafts incorrectly marked hardware validation as pending in the abstract;** a concrete run was
+> performed on **2026-10-03** and recorded in §0.1. The blanket warning above remains the general policy
+> of this runbook until all Blocks 1–8 are completed. Nothing here should be treated as runtime/model-
+> execution `[VALIDATED]`. The structure below is the plan; §0.1 is the first measurement.
 > a placeholder or a vendor claim. This document is a procedure to be executed, not a description of
 > a system that exists. Do not cite it as deployment guidance, and do not treat any port, model tag,
 > benchmark figure or security conclusion in it as established.
@@ -49,7 +52,99 @@ bash docs/x1-validate-part-a.sh 2>&1 | tee x1-a.log
 
 It covers Blocks 1–3 and 4.1 (catalogue discovery). Blocks 4–8 are deliberately **not** scripted,
 because their commands must embed the port and model tag this run discovers rather than assume them.
-Paste the Part A output back and Part B follows.
+
+---
+
+## 0.1 Part A results — 2026-10-03
+
+`[VALIDATED]` Block 1 passed in full. **The NPU is present and the kernel driver is loaded and
+correct.** Block 2 did not "fail" — it established that **no FastFlowLM software is installed at
+all**, so Blocks 3–8 cannot run yet. That is a provisioning gap, not a hardware fault.
+
+### Block 1 — hardware, kernel, driver: `[VALIDATED]` PASS
+
+| Signal | Observed | Verdict |
+|---|---|---|
+| NPU on PCI bus | `c6:00.1 Signal processing controller: Advanced Micro Devices, Inc. [AMD] Strix/Krackan/Strix Halo Neural Processing Unit (rev 10)` | `[VALIDATED]` criterion 1 |
+| Device node | `crw-rw----+ 1 root render 261, 0 Oct 2 07:22 accel0` in `/dev/accel/` | `[VALIDATED]` criterion 2 |
+| Module loaded | `amdxdna 172032 0`, with `amd_pmf 131072 1 amdxdna` and `gpu_sched 69632 2 amdxdna,amdgpu` | `[VALIDATED]` criterion 3 |
+| Driver origin | `/lib/modules/7.0.0-34-generic/kernel/drivers/accel/amdxdna/amdxdna.ko.zst` | **in-tree, not DKMS** |
+| `srcversion` | `4612EC552523E4C8FB4B5E5` | recorded verbatim |
+| `vermagic` | `7.0.0-34-generic SMP preempt mod_unload modversions` | recorded verbatim |
+| `dkms status` | *no output* — DKMS is **not installed** | consistent with in-tree driver |
+| Kernel | `7.0.0-34-generic` | `[VENDOR]` ≥ 7.0 ships `amdxdna` in-tree |
+| OS | `Ubuntu 26.04.1 LTS (Resolute Raccoon)` | **newer than any supported release** |
+| CPU threads | `24` | |
+| RAM | `Mem: 59Gi total, 2.3Gi used, 53Gi free, 4.4Gi buff/cache, 57Gi available`, `Swap: 8.0Gi` | usable total is 59 GiB, not the 64 GB the design assumed |
+| `ulimit -l` | **`8192`** (8 MiB) | ⚠ **BLOCKER — see below** |
+
+**The in-tree driver is the desired outcome.** `[VENDOR]` FastFlowLM requires the `amdxdna` driver,
+"included in kernel 7.0+, or via amdxdna-dkms". At kernel 7.0.0-34 the in-tree module already
+satisfies that requirement. **Do not install `amdxdna-dkms`** — on this kernel it would shadow a
+working in-tree module and add a rebuild-on-every-kernel-update failure mode for no benefit.
+
+### ⚠ Blocker 1 — memlock limit is 8 MiB, must be unlimited
+
+```
+$ ulimit -l
+8192
+```
+
+`[VENDOR]` The FastFlowLM Linux guide treats this as a hard prerequisite: NPU work requires locked
+memory, and `flm validate` is expected to report `Memlock Limit: infinity`. At 8 MiB, device buffer
+allocation will fail — most plausibly as `flm run` erroring with `No such device with index '0'`,
+which is easily misread as a missing NPU.
+
+Fix before installing:
+
+```bash
+echo -e "* soft memlock unlimited\n* hard memlock unlimited" | sudo tee -a /etc/security/limits.conf
+sudo reboot
+```
+
+Verify afterwards with `ulimit -l` in a **new login session** — `limits.conf` does not affect
+already-running shells.
+
+### ⚠ Blocker 2 — no FastFlowLM, no XRT stack
+
+| Component | Probe | Result |
+|---|---|---|
+| `flm` | `which flm` | not on PATH |
+| `xrt-smi` | `xrt-smi examine` | not found, `exit=127` |
+| Packages | `dpkg -l \| grep -Ei 'fastflowlm\|amdxdna\|xrt\|lemonade'` | no matches |
+| XRT userspace | — | not installed |
+
+`[VENDOR]` XRT is a documented prerequisite, and the DRM/XRT split is real and expected:
+
+> `flm validate` checks the kernel DRM path. `flm run` opens the NPU through XRT.
+
+So the absence of `xrt-smi` is **not** evidence the NPU is broken — it means the userspace half of
+the stack is absent. Once XRT is installed, `xrt-smi examine` must list the NPU independently of
+`flm validate` passing.
+
+### ⚠ Risk — Ubuntu 26.04 is newer than any documented target
+
+`[VENDOR]` The FastFlowLM Linux guide lists supported distributions as **Ubuntu 24.04 LTS, Ubuntu
+25.10, Arch Linux, and "Other (Generic Linux)"**. Ubuntu **26.04** is not listed. The guide's own
+firmware note warns that newer kernels can change NPU firmware protocol expectations, so a
+26.04-specific failure is plausible and must not be assumed to be a hardware fault.
+
+Mitigation if FastFlowLM misbehaves: retry the runtime test on Ubuntu 25.10 or 24.04 LTS before
+concluding anything about the NPU. Re-verify the driver finding above after any such change.
+
+### Firmware — inconclusive; my Part A probe used the wrong path
+
+Part A reported `no /lib/firmware/amdxdna`. `[VENDOR]` Current guidance points at
+**`/lib/firmware/amdnpu/`** for recent kernels — a different path. The negative result is therefore
+inconclusive rather than a finding. Firmware **1.1.0.0 or later** is a stated prerequisite, so
+re-check the correct path:
+
+```bash
+ls -la /lib/firmware/amdnpu/ 2>/dev/null || ls -la /lib/firmware/amdxdna/ 2>/dev/null || echo "no NPU firmware dir"
+dpkg -l | grep linux-firmware
+```
+
+`docs/x1-validate-part-a.sh` has been corrected to check both paths.
 
 ---
 
