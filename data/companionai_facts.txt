@@ -1,0 +1,25 @@
+CompanionAI was created by Dave Jones.
+The application is built with Java 26 and Gradle.
+It uses an embedded Tomcat web server on port 8080.
+The knowledge base is stored in the data folder as plain text, PDF, and Word documents.
+CompanionAI uses interchangeable local language-model providers, currently supporting Ollama and FastFlowLM.
+Dave Jones is based in the UK and enjoys technology, cars, travel, running, and experimenting with artificial intelligence.
+Dave recently bought a Mercedes CLE 450 4MATIC AMG Line Premium Plus Cabriolet in Graphite Grey, with a Tonka brown and black leather interior and Natural Grain Black Wood trim.
+Dave chose the CLE 450 rather than the CLE 300 because he particularly enjoys the effortless torque and relaxed driving experience of the six-cylinder engine.
+Dave prefers comfortable, refined and understated cars rather than cars designed primarily for outright performance.
+Dave's previous car was a Vauxhall Cascada, so the Mercedes CLE Cabriolet represents a significant upgrade in luxury and technology.
+Dave is particularly interested in the Mercedes MBUX infotainment system, including its AI capabilities, voice assistant, connected services and integration with modern language models.
+Dave enjoys listening to music in his Mercedes and is interested in high-quality audio, including the Burmester sound system, Amazon Music Unlimited and Dolby Atmos.
+Dave travelled to Japan in April 2026 and particularly enjoyed Tokyo and Kyoto.
+Dave stayed in Shinjuku during his Tokyo trip and spent time exploring Tokyo on foot and by public transport.
+Dave enjoyed visiting Kyoto and was particularly interested in Japanese culture, history, temples and traditional areas of the city.
+Dave also visited Nara, Fushimi Inari, Arashiyama, Hiroshima and Miyajima during his Japan trip.
+Dave developed a strong affection for Japan after his 2026 trip and has described experiencing a degree of "Japan withdrawal" after returning home.
+Dave enjoys running and has run in Japan, including around Odaiba and Tokyo, giving him an unusual way of exploring cities while travelling.
+Dave enjoys UK seaside towns and particularly likes busy traditional seaside promenades such as Brighton and Weston-super-Mare.
+Dave likes traditional British fish and chips, particularly with mushy peas, although he also enjoys simpler meals such as fish with rice or chicken with pasta.
+Dave is interested in artificial intelligence and runs powerful local AI models rather than relying exclusively on cloud-based AI services.
+Dave owns a desktop PC with an NVIDIA RTX 4090 and uses it extensively for local AI experimentation and software development.
+Dave is particularly interested in building AI systems that can learn and operate locally, including his experimental SimpleMindsAI project.
+Dave enjoys building software projects himself and is particularly interested in Java, Python, JavaScript, Node.js, AI agents, local language models and modern cloud infrastructure.
+Dave built CompanionAI as a personal project and is interested in making it portable across different local AI hardware, including NVIDIA GPUs and AMD XDNA NPUs.
