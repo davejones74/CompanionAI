@@ -96,6 +96,21 @@ statnum() {
   printf '%s' "${v:-0}"
 }
 
+# Liveness probe for a third-party runtime.
+#
+# '-f' is deliberately NOT used. FastFlowLM's /api/stats answers with a status
+# other than 2xx on this release, and -f converts any 4xx/5xx into a curl failure,
+# which made a perfectly healthy runtime look dead. What we need to know here is
+# only whether the TCP listener speaks HTTP at all, so any HTTP response counts
+# as "answering" and only a transport-level failure aborts.
+#
+# Sets FLM_CODE and FLM_RC.
+flm_probe() { # flm_probe <url> <body-out> <stderr-out>
+  FLM_CODE="$(curl -sS -m 20 --http1.1 \
+    -o "$2" -w '%{http_code}' "$1" 2>"$3")"
+  FLM_RC=$?
+}
+
 stop_app() {
   [ "$STOPPED" -eq 1 ] && return 0
   STOPPED=1
@@ -133,10 +148,29 @@ fi
 
 head1 "Preflight"
 
-if curl -fsS -m 10 "$FLM_URL/api/stats" >"$TMP/flm-before.json" 2>/dev/null; then
-  info "FastFlowLM is answering at $FLM_URL"
+flm_probe "$FLM_URL/api/stats" "$TMP/flm-before.json" "$TMP/flm-before.err"
+if [ "$FLM_RC" -eq 0 ]; then
+  FLM_PROBE_PATH="/api/stats"
+  info "FastFlowLM is answering - GET /api/stats -> HTTP ${FLM_CODE:-?}"
 else
-  die "FastFlowLM is not answering at $FLM_URL - start it with: flm serve"
+  info "GET /api/stats failed at the transport level (curl $FLM_RC): $(head -c 200 "$TMP/flm-before.err")"
+  info "falling back to GET /v1/models..."
+  flm_probe "$FLM_URL/v1/models" "$TMP/flm-before.json" "$TMP/flm-before.err"
+  if [ "$FLM_RC" -eq 0 ]; then
+    FLM_PROBE_PATH="/v1/models"
+    info "FastFlowLM is answering - GET /v1/models -> HTTP ${FLM_CODE:-?}"
+  else
+    info "GET /v1/models also failed (curl $FLM_RC): $(head -c 200 "$TMP/flm-before.err")"
+    die "FastFlowLM is not reachable at $FLM_URL - start it with: flm serve"
+  fi
+fi
+FLM_PROBE_BEFORE="$(cat "$TMP/flm-before.json" 2>/dev/null)"
+if [ "${FLM_CODE:-0}" -ge 400 ] 2>/dev/null || [ -z "$FLM_PROBE_BEFORE" ]; then
+  info "note: ${FLM_PROBE_PATH} returned ${FLM_CODE:-?} with an empty/short body, so the"
+  info "      before/after counter cross-check at the end will be skipped. The"
+  info "      offline=false assertions are the authoritative proof."
+else
+  info "probe body: $(printf '%s' "$FLM_PROBE_BEFORE" | head -c 200)"
 fi
 
 if command -v flm >/dev/null 2>&1; then
@@ -389,17 +423,18 @@ PY
 
 head1 "Cross-check - FastFlowLM's own counters"
 
-curl -fsS -m 10 "$FLM_URL/api/stats" >"$TMP/flm-after.json" 2>/dev/null || true
+flm_probe "$FLM_URL$FLM_PROBE_PATH" "$TMP/flm-after.json" "$TMP/flm-after.err"
+info "GET $FLM_PROBE_PATH -> HTTP ${FLM_CODE:-?} (curl $FLM_RC)"
 
-if command -v python3 >/dev/null 2>&1 && [ -s "$TMP/flm-after.json" ]; then
-  python3 - "$TMP/flm-before.json" "$TMP/flm-after.json" <<'PY'
+if [ "$FLM_RC" -eq 0 ] && [ -s "$TMP/flm-after.json" ] && [ -n "$FLM_PROBE_BEFORE" ]; then
+  python3 - "$FLM_PROBE_BEFORE" "$TMP/flm-after.json" <<'PY'
 import json, sys
 
-def flat(path):
+def flat(text):
     try:
-        d = json.load(open(path, encoding="utf-8"))
+        d = json.loads(text)
     except Exception as exc:
-        print("      (unparseable: %s)" % exc)
+        print("      (not JSON: %s)" % exc)
         return {}
     out = {}
     if isinstance(d, dict):
@@ -410,7 +445,8 @@ def flat(path):
 
 before, after = flat(sys.argv[1]), flat(sys.argv[2])
 if not after:
-    print("      FastFlowLM /api/stats has no flat numeric counters to compare")
+    print("      no flat numeric counters to compare; skipping.")
+    print("      The offline=false assertions above remain authoritative.")
     sys.exit(0)
 changed = [(k, before.get(k), after[k]) for k in sorted(after)
            if isinstance(before.get(k), int) and after[k] != before[k]]
@@ -426,6 +462,8 @@ else:
     print("            should have moved. Treat as a question, not a failure - the")
     print("            offline=false assertions above are the authoritative signal.")
 PY
+else
+  info "skipping the counter comparison (no usable before/after body)"
 fi
 
 # --------------------------------------------------------------------------

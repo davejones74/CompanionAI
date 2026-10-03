@@ -106,12 +106,26 @@ single lump after a long pause is buffering. `/api/stats` should show `streamed:
 
 | Failure reading | Likely cause | Check |
 |---|---|---|
-| `FastFlowLM is not answering` | `flm serve` not running | `flm port`, `ss -ltnp \| grep 52625` |
+| `FastFlowLM is not reachable at ...` | nothing is listening, or the listener does not speak HTTP | `flm port`, `ss -ltnp \| grep 52625` |
+| `GET /api/stats -> HTTP 4xx/5xx` in the preflight | FastFlowLM does not implement that path | not fatal. The harness falls back to `/v1/models` and skips the counter cross-check |
 | Request hangs until timeout | model tag wrong | `flm list --filter installed` — R7/R8: no 404, it hangs |
 | `offline=true` | transport rejected the request | app log: `LLM stream failed: ...` carries the FastFlowLM body |
 | `No base URL configured for provider` warning | base URL not passed explicitly | use `script/run.sh`, or set `companionai.llm.baseUrl` |
 | `port 8080 is already in use` | app already running | stop it, or set `APP_URL=` to target the other instance |
 | Deltas arrive but all at once | buffering in front of the app | none expected locally; this is the Nginx check in §15 |
+
+### Note on the FastFlowLM liveness probe
+
+The preflight deliberately does **not** use `curl -f`. FastFlowLM's `/api/stats` answers with a
+non-2xx status, and `-f` turns any 4xx/5xx into a curl failure — which made a perfectly healthy
+runtime report as `not answering`. Only a transport-level error (connection refused, timeout,
+malformed response) counts as down; any HTTP response at all counts as up. To see what the endpoint
+actually returns:
+
+```bash
+curl -sS -o /dev/null -w 'HTTP %{http_code}\n' http://127.0.0.1:52625/api/stats
+curl -sS http://127.0.0.1:52625/v1/models
+```
 
 ## After it passes
 
