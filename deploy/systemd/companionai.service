@@ -35,8 +35,23 @@ Environment=HOME=/var/lib/companionai
 # COMPANION_AI_OPTS: -D arguments are world-readable in `ps -ef`.
 EnvironmentFile=/etc/companionai/companionai.env
 
-# Anything non-secret that genuinely must be a system property goes here.
-Environment=CAMPANION_AI_OPTS=-Dfile.encoding=UTF-8
+# Required. A systemd unit does not source any shell profile, so JAVA_HOME is unset and
+# `java` is not on the unit's PATH. The Gradle start script then exits 1 immediately with:
+#   ERROR: JAVA_HOME is not set and no 'java' command could be found in your PATH.
+#
+# Must be a shared location, NOT a developer's home directory. This host had the JDK at
+# /home/dave/opt/jdk-26.0.2, which User=companionai cannot traverse, and which
+# ProtectHome=yes would hide outright. Relocate it first:
+#   sudo mkdir -p /opt/java
+#   sudo mv /home/dave/opt/jdk-26.0.2 /opt/java/jdk-26.0.2
+# Then verify the service user can actually execute it:
+#   sudo -u companionai /opt/java/jdk-26.0.2/bin/java -version
+Environment=JAVA_HOME=/opt/java/jdk-26.0.2
+
+# Use JAVA_OPTS, not an application-specific variable. The Gradle-generated start script
+# always reads JAVA_OPTS; the app-specific name depends on how Gradle derives it from the
+# application name, and a wrong guess fails silently by setting a variable nothing reads.
+Environment=JAVA_OPTS=-Dfile.encoding=UTF-8
 
 ExecStart=/opt/companionai/bin/CompanionAI
 

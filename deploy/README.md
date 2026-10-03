@@ -48,12 +48,21 @@ not find it. Populate the service user's cache once, with the service stopped:
 
 ```bash
 sudo systemctl stop fastflowlm
-sudo -u fastflowlm -H flm pull qwen2.5-it:3b
+sudo -u fastflowlm env HOME=/var/lib/fastflowlm flm pull qwen2.5-it:3b
 ```
+
+Do not use `sudo -u fastflowlm -H` here. `-H` sets `HOME` from the passwd entry, which is
+the stale `/home/fastflowlm`, so it reproduces the original permission error. Pass `HOME`
+explicitly to match `Environment=HOME=` in the unit.
 
 This is the manual operator step from the network discussion. It is the only part of
 FastFlowLM's lifecycle that needs outbound network, which is why it is not automated in
 the unit.
+
+The pull is incremental — it fetches only missing files and verifies hashes for each. A
+first-time pull of a 3B model is the large transfer; a pull after an interrupted
+on-demand fetch may only need a few hundred KB of tokenizer files. Either way, keep the
+service stopped while you run it, so no request can race the download.
 
 ## 2. Deploy the application
 
@@ -65,6 +74,30 @@ overwrite live data:
 sudo mkdir -p /opt/companionai
 sudo cp -r build/install/CompanionAI/. /opt/companionai/
 ```
+
+### Relocate the JDK out of your home directory
+
+`companionai.service` needs `JAVA_HOME`, and a systemd unit gets none of your shell's
+environment. On this host the toolchain was at `/home/dave/opt/jdk-26.0.2`, which
+`User=companionai` cannot traverse and which `ProtectHome=yes` would hide entirely. Move it
+somewhere shared:
+
+```bash
+sudo mkdir -p /opt/java
+sudo mv /home/dave/opt/jdk-26.0.2 /opt/java/jdk-26.0.2
+```
+
+You can leave a symlink behind so an existing `JAVA_HOME` in your shell profile keeps
+resolving, or just update the profile to point at the new path. Either way the service must
+use the real `/opt/java/...` path, never a symlink under a home directory.
+
+Then prove the service user can actually run it, rather than assuming:
+
+```bash
+sudo -u companionai /opt/java/jdk-26.0.2/bin/java -version
+```
+
+Set `Environment=JAVA_HOME=` in the unit to the real `/opt/java/...` path.
 
 ## 3. The environment file, including the auth token
 
@@ -78,8 +111,8 @@ openssl rand -hex 32      # paste into COMPANIONAI_AUTH_TOKEN
 `0600` root-owned is correct: systemd reads `EnvironmentFile=` as root before dropping to
 `User=companionai`, so the service user never reads the file.
 
-The token goes in the environment, not in `COMPANION_AI_OPTS`. `-D` arguments are world-readable in
-`ps -ef`; environment variables are readable only through `/proc/<pid>/environ`.
+The token goes in the environment, not in `JAVA_OPTS`. `-D` arguments are world-readable
+in `ps -ef`; environment variables are readable only through `/proc/<pid>/environ`.
 
 ## 4. Units
 
@@ -98,22 +131,33 @@ Verify the runtime before starting the app — this isolates failures:
 systemctl status fastflowlm
 flm port
 curl -sS http://127.0.0.1:52625/v1/models
-ss -ltnp | grep 52625      # must show 127.0.0.1, never 0.0.0.0 or *
+ss -ltnp | grep 52625
 ```
+
+Reading that last line: check the **Local Address:Port** column, which must be
+`127.0.0.1:52625`. A `0.0.0.0:*` in the **Peer Address:Port** column is normal and
+expected for any listening socket — it is not a bind address and does not mean the port
+is exposed. Reject the line only if the local column reads `0.0.0.0:52625` or
+`*:*:52625`.
 
 Then the app:
 
 ```bash
 sudo systemctl enable --now companionai.service
 systemctl status companionai
-curl -sS http://127.0.0.1:8080/api/stats
+
+# Auth required. curl sends Accept: */*, not text/html, so this takes AuthFilter's API
+# path and returns 401 without the token. Expect 401 here if you forget it -- that is
+# the filter working, not a broken app.
+TOKEN=$(sudo grep COMPANIONAI_AUTH_TOKEN /etc/companionai/companionai.env | cut -d= -f2)
+curl -sS -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8080/api/stats
 ```
 
 Expect `[VALIDATED]` stream behaviour locally — deltas arriving word by word:
 
 ```bash
 curl -sSN -X POST http://127.0.0.1:8080/api/chat/stream \
-  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d '{"message":"In exactly three short sentences, explain what a database index is."}'
 ```
 
@@ -209,6 +253,98 @@ Read the actual cause once with `journalctl -u fastflowlm -n 20` instead of watc
 Expected once, and not a bug. `flm pull` as a normal user installs into that user's
 cache. Pull again as the service user (see step 1) or the runtime will start but every
 request will fail.
+
+### `/v1/chat/completions` hangs with no output
+
+This is the symptom of a missing model, and it is the worst-behaved failure in this
+stack: `flm serve` does not return 404 or any error. It attempts to fetch the weights
+on demand from inside the serving process and waits, so the request simply never
+completes. `systemctl status` shows no restart, so nothing logs an error either.
+
+Confirm by watching for the download rather than the request:
+
+```bash
+journalctl -u fastflowlm -f              # in a second terminal, then retry the curl
+sudo du -sh /var/lib/fastflowlm          # a growing size confirms it
+```
+
+Prefer the explicit pull in step 1 over letting the server discover this. It prints
+progress, fails loudly on a network problem, and does not hold a request open while it
+does it.
+
+Note for the network discussion: `flm serve` **will** initiate outbound network when a
+requested model is absent from its cache. A run that only ever exercised an
+already-installed model would not have shown this.
+
+### Do not use `/v1/models` to check whether a model is installed
+
+`/v1/models` returns the full static catalog of models FastFlowLM supports — around 40
+entries including ones that are certainly not on this host. Every entry reports an
+identical `created` timestamp, which is the giveaway: these are compile-time constants,
+not install records. It answered normally while the model was demonstrably absent, so it
+is worthless as an availability check.
+
+Check the filesystem instead:
+
+```bash
+sudo ls -l /var/lib/fastflowlm/.config/flm/models/
+```
+
+### `invalid UTF-8 byte at index N` from `/v1/chat/completions`
+
+A 500 from the parser, but **not** a parser problem and not a config problem. The real
+signature is in the journal: the request appears to succeed all the way through the
+NPU, then fails.
+
+```
+[🟢 ]  NPU Locked!
+[FLM]  Loading model: .../Qwen2.5-3B-Instruct-NPU2
+[FLM]  Prefill chunk 1/1 with 31 tokens
+[FLM]  Start generating...
+[FLM]  Model RAW Output:
+[9B blob data]                      <-- binary: the weights are corrupt
+[🔵 ]  NPU Lock Released!
+```
+
+The model loaded and ran, so `config.json` and the tokenizer are fine. It emitted
+non-textual bytes because the weights are truncated, and the failure surfaces later when
+FastFlowLM tries to interpret that output — which is why the error names JSON and UTF-8
+and sends you looking in entirely the wrong place. `[9B blob data]` under
+`Model RAW Output:` is the actual diagnostic.
+
+Cause is normally an interrupted or killed download. `flm pull` lists already-present
+files but **only hash-verifies the ones it actually downloads**, so a truncated file
+survives every subsequent pull and reports "All files verified successfully".
+
+Compare the weights against a known-good copy rather than re-pulling blind:
+
+```bash
+D=/var/lib/fastflowlm/.config/flm/models/Qwen2.5-3B-Instruct-NPU2
+sudo ls -l  "$D"/model.q4nx ~/.config/flm/models/Qwen2.5-3B-Instruct-NPU2/model.q4nx
+sudo md5sum "$D"/*; md5sum ~/.config/flm/models/Qwen2.5-3B-Instruct-NPU2/*
+```
+
+A smaller file is a truncated download. Delete it and pull again — the pull will not
+replace it on its own, because it is present and therefore considered done:
+
+```bash
+sudo systemctl stop fastflowlm
+sudo rm -v "$D"/model.q4nx
+sudo -u fastflowlm env HOME=/var/lib/fastflowlm flm pull qwen2.5-it:3b
+sudo systemctl start fastflowlm
+```
+
+This is the full-size weights download, not the few-hundred-KB tokenizer fetch.
+
+### `ERROR: JAVA_HOME is not set and no 'java' command could be found in your PATH`
+
+The Gradle start script exits 1 on its first line. systemd does not source any shell
+profile, so `JAVA_HOME` and `PATH` are not inherited the way they are in your terminal.
+Set `Environment=JAVA_HOME=` in `companionai.service` to a shared JDK — see step 2 for why
+it must not point into a developer's home directory.
+
+Symptom shape to recognise: exit 1 at ~11 ms CPU and ~3 MB peak memory. Tomcat never
+starts, so nothing about the app, the ports or FastFlowLM is implicated.
 
 ## Rollback
 
