@@ -61,15 +61,28 @@ public class ModelServlet extends HttpServlet {
     private final long maxFetchBytes = Long.getLong("campanionai.maxFetchBytes", 2L * 1024 * 1024);
     private final boolean allowPrivateFetch = Config.bool(
             "campanionai.allowPrivateFetch", "COMPANIONAI_ALLOW_PRIVATE_FETCH", false);
-    private final boolean liveEnabled = System.getProperty("campanionai.live.enabled", "true").equalsIgnoreCase("true");
-    private final boolean liveLlmMode = System.getProperty("campanionai.live.intent", "llm").equalsIgnoreCase("llm");
-    private final String searchApiKey = System.getProperty("campanionai.searchApiKey", "");
-    private final String sportsApiKey = System.getProperty("campanionai.sportsApiKey", "");
-    private final String defaultLocation = System.getProperty("campanionai.live.defaultLocation", "");
-    private final int liveWebResults = Integer.getInteger("campanionai.live.webResults", 5);
-    private final int liveFetchPages = Integer.getInteger("campanionai.live.fetchPages", 2);
-    private final int liveContextTokens = Integer.getInteger("campanionai.live.contextTokens", 4000);
-    private final int sportsMaxPerDay = Integer.getInteger("campanionai.sports.maxRequestsPerDay", 100);
+    // Live-retrieval settings keep their original strict parse rather than Config.bool:
+    // only the literal "true" enables and only "llm" selects LLM intent, matching the
+    // behaviour that shipped. Config.bool would silently fail *open* on a typo like "yes",
+    // which is the wrong direction for a master enable switch.
+    private final boolean liveEnabled = Config.string(
+            "campanionai.live.enabled", "COMPANIONAI_LIVE_ENABLED", "true").equalsIgnoreCase("true");
+    private final boolean liveLlmMode = Config.string(
+            "campanionai.live.intent", "COMPANIONAI_LIVE_INTENT", "llm").equalsIgnoreCase("llm");
+    private final String searchApiKey = Config.string(
+            "campanionai.searchApiKey", "COMPANIONAI_SEARCH_API_KEY", "");
+    private final String sportsApiKey = Config.string(
+            "campanionai.sportsApiKey", "COMPANIONAI_SPORTS_API_KEY", "");
+    private final String defaultLocation = Config.string(
+            "campanionai.live.defaultLocation", "COMPANIONAI_LIVE_DEFAULT_LOCATION", "");
+    private final int liveWebResults = Config.integer(
+            "campanionai.live.webResults", "COMPANIONAI_LIVE_WEB_RESULTS", 5);
+    private final int liveFetchPages = Config.integer(
+            "campanionai.live.fetchPages", "COMPANIONAI_LIVE_FETCH_PAGES", 2);
+    private final int liveContextTokens = Config.integer(
+            "campanionai.live.contextTokens", "COMPANIONAI_LIVE_CONTEXT_TOKENS", 4000);
+    private final int sportsMaxPerDay = Config.integer(
+            "campanionai.sports.maxRequestsPerDay", "COMPANIONAI_SPORTS_MAX_REQUESTS_PER_DAY", 100);
 
     private final WebFetcher fetcher = new WebFetcher(maxFetchBytes, allowPrivateFetch);
     private final UsageStats stats = new UsageStats();

@@ -24,7 +24,8 @@ class ConfigTest {
     private static final List<String> KEYS = List.of(
             "COMPANIONAI_HOST", "COMPANIONAI_PORT", "COMPANIONAI_AUTH_TOKEN",
             "COMPANIONAI_DATA_DIR", "COMPANIONAI_ALLOW_PRIVATE_FETCH",
-            "COMPANIONAI_NO_SUCH_VAR");
+            "COMPANIONAI_SPORTS_API_KEY", "COMPANIONAI_SEARCH_API_KEY",
+            "COMPANIONAI_LIVE_ENABLED", "COMPANIONAI_NO_SUCH_VAR");
 
     private final Set<String> injected = new HashSet<>();
 
@@ -153,5 +154,19 @@ class ConfigTest {
         withEnv("COMPANIONAI_DATA_DIR", "/srv/companionai/data");
         assertEquals("/srv/companionai/data",
                 Config.string("campanionai.dataDir", "COMPANIONAI_DATA_DIR", "./data"));
+    }
+
+    @Test
+    void sportsApiKeyResolvesFromEnvironment() {
+        withEnv("COMPANIONAI_SPORTS_API_KEY", "football-key");
+        // Without this, the key sits in the env file, isConfigured() returns false and
+        // sports retrieval silently disables itself.
+        assertEquals("football-key",
+                Config.string("campanionai.sportsApiKey", "COMPANIONAI_SPORTS_API_KEY", ""));
+    }
+
+    @Test
+    void unsetSportsApiKeyIsEmptySoRetrievalStaysOff() {
+        assertEquals("", Config.string("campanionai.sportsApiKey", "COMPANIONAI_NO_SUCH_VAR", ""));
     }
 }
