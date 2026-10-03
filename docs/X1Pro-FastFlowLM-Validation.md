@@ -257,7 +257,23 @@ network control. CompanionAI is the component that must be protected, and it def
 CompanionAI started cleanly against FastFlowLM, Tomcat reported healthy, `GET /` returned the UI
 HTML and `GET /api/stats` returned valid JSON. **No `/api/chat` or `/api/chat/stream` request has been
 made through CompanionAI**, so the application-to-model path is untested end to end even though F1/F2
-pass against the runtime directly.
+pass against the runtime directly. See [X1Pro-E2E-Chat-Test.md](X1Pro-E2E-Chat-Test.md).
+
+### Corrections to earlier assumptions
+
+Three assumptions in this document and in the launcher's tooling were wrong, and are corrected here
+by measurement:
+
+| Assumption | Reality |
+|---|---|
+| FastFlowLM exposes `GET /api/stats` with counters | `[OBSERVED]` **`/api/stats` returns HTTP 404.** It is not a usable endpoint. `/v1/models` is the liveness path, and `LlmCapability.HEALTH_CHECK` should be read as unverified for that reason. Any earlier cross-check that read `/api/stats` was reading an error body, not telemetry. |
+| The FastFlowLM model tag is the first column of `flm list --filter installed` | `[OBSERVED]` the listing is decorated (status glyphs, dashes); the tag is **not** in a fixed field. A `grep '✅' \| awk '{print $1}'` parse yields `-` and then reports an installed model as missing. `script/run.sh` now substring-matches the raw output instead. |
+| `flm pull` fetches from the network | `[OBSERVED]` `flm pull qwen2.5-it:3b` reports `Model already downloaded` and resolves the tag to the concrete artefact `Qwen2.5-3B-Instruct-NPU2`. Models are fetched once, by hand, and are present locally afterwards. This is the first evidence bearing on §22.6's outbound-network question. |
+
+The `flm list` column-layout bug had a second-order effect worth recording: `script/run.sh` refused
+to launch because of it. A pre-flight check that yields a **false negative** on a correct
+configuration is worse than no check, because it blocks a valid launch and blames the operator. It now
+dumps the raw listing on failure and supports `SKIP_MODEL_CHECK=1`.
 
 ### Risk: Ubuntu 26.04 remains unsupported by the vendor
 

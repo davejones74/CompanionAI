@@ -106,18 +106,32 @@ check_model_installed() {
         echo "NOTE: 'flm' is not on PATH; skipping the installed-model check." >&2
         return 0
       fi
-      local installed
-      installed="$(flm list --filter installed 2>/dev/null | grep -F '✅' | awk '{print $1}' || true)"
-      if [ -z "$installed" ]; then
-        echo "NOTE: could not read the FastFlowLM model list; skipping the check." >&2
+      if [ "${SKIP_MODEL_CHECK:-0}" = "1" ]; then
+        echo "NOTE: SKIP_MODEL_CHECK=1; skipping the installed-model check." >&2
         return 0
       fi
-      if printf '%s\n' "$installed" | grep -Fxq -- "$model"; then
+      # Substring match on the raw listing, never a column parse. 'flm list'
+      # decorates each row (status glyphs, dashes) and the tag is not reliably
+      # in any particular field, so awk/grep-pipeline parsing silently yields
+      # junk like '-' and then reports a perfectly good model as missing.
+      local raw
+      raw="$(flm list --filter installed 2>/dev/null || true)"
+      if [ -z "${raw//[[:space:]]/}" ]; then
+        echo "NOTE: 'flm list --filter installed' produced no output;" >&2
+        echo "      skipping the installed-model check." >&2
         return 0
       fi
-      echo "ERROR: model '$model' is not installed in FastFlowLM." >&2
-      echo "       Installed models: $installed" >&2
-      echo "       Pull it first with: flm pull $model" >&2
+      if printf '%s\n' "$raw" | grep -Fq -- "$model"; then
+        return 0
+      fi
+      echo "ERROR: model '$model' does not appear in the installed-model list." >&2
+      printf '%s\n' "$raw" | sed 's/^/         | /' >&2
+      echo >&2
+      echo "       FastFlowLM does not reject an unknown tag - it hangs until" >&2
+      echo "       timeout, so this check exists to catch exactly that." >&2
+      echo "       If your model IS shown above, this check is misreading the" >&2
+      echo "       output format: fix check_model_installed in script/run.sh, or" >&2
+      echo "       re-run with SKIP_MODEL_CHECK=1." >&2
       return 1
       ;;
   esac
