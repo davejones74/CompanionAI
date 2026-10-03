@@ -25,6 +25,10 @@ public final class SportsProvider implements RetrievalProvider {
     private static final String DEFAULT_BASE_URL = "https://v3.football.api-sports.io";
     private static final DateTimeFormatter DATE = DateTimeFormatter.ofPattern("d MMM yyyy", Locale.ENGLISH);
 
+    /** Window either side of today for the fixtures lookup, in days. */
+    private static final int LOOKBACK_DAYS = 60;
+    private static final int LOOKAHEAD_DAYS = 45;
+
     private static final Map<String, Integer> LEAGUES = Map.of(
             "premier league", 39,
             "championship", 40,
@@ -110,7 +114,14 @@ public final class SportsProvider implements RetrievalProvider {
     }
 
     private String fixtures(int teamId, String teamName) throws RetrievalException {
-        JsonNode root = get("/fixtures?team=" + teamId + "&last=1&next=1");
+        // Deliberately not `last=1&next=1`. The `last` parameter is rejected outright
+        // on the Free plan ("Free plans do not have access to the Last parameter"),
+        // and the whole lookup fails rather than degrading. A from/to window is
+        // accepted on every plan and gives us both halves of the answer in one call.
+        LocalDate today = LocalDate.now();
+        String from = today.minusDays(LOOKBACK_DAYS).toString();
+        String to = today.plusDays(LOOKAHEAD_DAYS).toString();
+        JsonNode root = get("/fixtures?team=" + teamId + "&from=" + from + "&to=" + to);
         JsonNode arr = root.path("response");
         StringBuilder out = new StringBuilder();
         JsonNode finished = null;
@@ -118,8 +129,14 @@ public final class SportsProvider implements RetrievalProvider {
         if (arr.isArray()) {
             for (JsonNode f : arr) {
                 String status = f.path("fixture").path("status").path("short").asText("");
-                if (isFinished(status)) finished = f;
-                else if (isUpcoming(status)) upcoming = f;
+                // The response is chronological, so the last finished entry is the
+                // most recent result. Keep the FIRST upcoming instead, or a wide
+                // window reports the furthest fixture rather than the next one.
+                if (isFinished(status)) {
+                    finished = f;
+                } else if (isUpcoming(status) && upcoming == null) {
+                    upcoming = f;
+                }
             }
         }
         if (finished != null) {

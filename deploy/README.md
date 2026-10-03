@@ -8,7 +8,7 @@ containerised: two systemd units and one Nginx site, in that order.
 | `systemd/fastflowlm.service` | NPU inference runtime, loopback only |
 | `systemd/companionai.service` | Tomcat app, ordered after the above |
 | `companionai.env.example` | root-only configuration, including the auth token |
-| `nginx/companionai.conf` | TLS terminator with SSE-safe proxying |
+| `nginx/companionai-locations.conf` | SSE-safe locations for the shared `x1pro` vhost |
 
 Two things to read before starting:
 
@@ -149,7 +149,7 @@ systemctl status companionai
 # Auth required. curl sends Accept: */*, not text/html, so this takes AuthFilter's API
 # path and returns 401 without the token. Expect 401 here if you forget it -- that is
 # the filter working, not a broken app.
-TOKEN=$(sudo grep COMPANIONAI_AUTH_TOKEN /etc/companionai/companionai.env | cut -d= -f2)
+TOKEN=$(sudo grep -E '^COMPANIONAI_AUTH_TOKEN=' /etc/companionai/companionai.env | cut -d= -f2-)
 curl -sS -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8080/api/stats
 ```
 
@@ -170,81 +170,111 @@ tagged reply with `offline=true`; coupling lifetimes would take the UI down inst
 
 Change this only if you prefer no UI at all to a UI that cannot answer.
 
-## 5. Nginx — bootstrap, then TLS
+## 5. Nginx — one shared hostname, two applications
 
-The two halves of this config must be installed in order, and the order is forced by a
-dependency that runs in both directions. `companionai.conf` references a certificate that
-does not exist yet, and nginx treats a missing `ssl_certificate` as fatal — it will not
-start at all. certbot in turn cannot issue without port 80 already serving the challenge.
-Deploying only the HTTPS file first therefore guarantees the failure above.
-
-Install the cert-free half first:
+`x1pro.runningcode.dev` already serves a small placeholder page and already has a
+certificate. CompanionAI is mounted **under a path** on that same hostname rather than on a
+subdomain of its own, so `nginx/companionai-locations.conf` is a fragment of `location`
+blocks, not a `server` block. Two `server` blocks with the same `server_name` on the same
+port would only work by accident — whichever nginx loaded first would win, and the other
+would be silently dead.
 
 ```bash
-sudo cp deploy/nginx/companionai-http.conf /etc/nginx/sites-available/companionai
-sudo ln -sf /etc/nginx/sites-available/companionai /etc/nginx/sites-enabled/
-ls -l /etc/nginx/sites-enabled/          # must be a symlink, not a regular file
+sudo mkdir -p /etc/nginx/snippets
+sudo cp deploy/nginx/companionai-locations.conf /etc/nginx/snippets/
+sudoedit /etc/nginx/sites-enabled/x1pro     # add one line inside the HTTPS server{}:
+```
+
+```nginx
+    include /etc/nginx/snippets/companionai-locations.conf;
+```
+
+```bash
 sudo nginx -t && sudo systemctl reload nginx
 ```
 
-Then issue the certificate (step 6), then swap in the HTTPS file:
+The app is then at `https://x1pro.runningcode.dev/companionAI/`. The placeholder page must
+still answer at `/` — that is the check proving the `include` merged rather than displaced
+anything.
 
-```bash
-sudo cp deploy/nginx/companionai.conf /etc/nginx/sites-available/companionai
-sudo ln -sf /etc/nginx/sites-available/companionai /etc/nginx/sites-enabled/
-sudo nginx -t && sudo systemctl reload nginx
-```
+### The API has to be routable at the root too
 
-`ln -sf` will not replace an existing regular file. If `sites-enabled/companionai` is a
-regular file rather than a symlink, `rm` it first.
+The served HTML calls absolute URLs: `fetch('/api/stats')`, `fetch('/api/chat/stream')`,
+`fetch('/upload')`. A browser on `/companionAI/` therefore issues those against the
+**domain root**, not under the prefix. So the fragment proxies three paths, not one:
 
-`proxy_buffering off` and `gzip off` are the load-bearing directives. With buffering on, Nginx reads
-the entire response before forwarding a byte, which converts a word-by-word stream into one lump
-arriving at the end.
+| Location | Purpose |
+|---|---|
+| `/companionAI/` | the app, prefix stripped by the `proxy_pass` trailing slash |
+| `/api/` | absolute-path API calls from the app's own JS |
+| `/upload` | absolute-path file upload |
+| `/v1/` | hard 404 — FastFlowLM is never proxied |
 
-## 6. DNS and certificate
+Dropping the `/api/` and `/upload` blocks is the failure mode worth recognising: the page
+loads and looks healthy, then every single request 404s.
 
-```bash
-# A record for companionai.runningcode.dev -> the X1's public IP, then:
-sudo mkdir -p /var/www/acme
-sudo certbot --webroot -w /var/www/acme -d companionai.runningcode.dev
-```
-
-Use `--webroot`, **not** `--nginx`. The site config already declares
-`location /.well-known/acme-challenge/ { root /var/www/acme; }`, and `--nginx` works by
-injecting a challenge `location` of its own into the server block. Two matching locations in
-one block is a `duplicate location` error, so `nginx -t` fails and the server will not reload.
-`--webroot` satisfies the challenge through the location that is already there and never edits
-the config, which also keeps renewal from rewriting a file under version control.
-
-Run it only after the port 80 redirect is live, or the challenge request gets a 301 and
-certbot reports it as unreachable.
+The alternative is `sub_filter`-rewriting the HTML, which needs `ngx_http_sub_module` and
+breaks if the markup shifts. Proxying the root paths is less clever and considerably more
+robust.
 
 ## 7. Full path verification
 
-```bash
-# unauthenticated must be rejected (curl sends Accept: */*, not text/html, so this
-# takes AuthFilter's API path and must return 401)
-curl -sS -o /dev/null -w '%{http_code}\n' https://companionai.runningcode.dev/api/stats
+All of these run against the shared hostname, not a CompanionAI subdomain.
 
-# authenticated streaming through Nginx: watch it arrive incrementally.
-# AuthFilter reads the "Authorization" header and requires a "Bearer " prefix;
-# a browser will instead hold the session cookie set by the login page.
-TOKEN=$(sudo grep COMPANIONAI_AUTH_TOKEN /etc/companionai/companionai.env | cut -d= -f2)
-curl -sSN -X POST https://companionai.runningcode.dev/api/chat/stream \
+```bash
+TOKEN=$(sudo grep -E '^COMPANIONAI_AUTH_TOKEN=' /etc/companionai/companionai.env | cut -d= -f2-)
+
+# the app under its path prefix
+curl -sS -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $TOKEN" \
+  https://x1pro.runningcode.dev/companionAI/
+
+# the pre-existing site must still answer -- proves the include merged, not displaced
+curl -sS https://x1pro.runningcode.dev/ | head -1
+
+# unauthenticated and wrong-token must both be rejected. curl sends Accept: */*, not
+# text/html, so this takes AuthFilter's API path; AuthFilter reads the "Authorization"
+# header and requires a "Bearer " prefix. A browser instead holds the login cookie.
+curl -sS -o /dev/null -w '%{http_code}\n' https://x1pro.runningcode.dev/api/stats
+curl -sS -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer wrong" \
+  https://x1pro.runningcode.dev/api/stats
+
+# authenticated streaming through Nginx: watch it arrive incrementally
+time curl -sSN -X POST https://x1pro.runningcode.dev/api/chat/stream \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d '{"message":"In exactly three short sentences, explain what a database index is."}'
 ```
 
-Reproduce the measured thresholds from `script/e2e-fastflowlm.sh` through the public endpoint: at
+Measured on the X1 Pro over public TLS, `[VALIDATED]`: 41 delta events across 4.55 s wall,
+ending `{"offline":false,"done":true}`. The same prompt straight to Tomcat on
+`127.0.0.1:8080` gave 24 deltas in 3.82 s, so the proxy adds roughly 0.7 s without flattening
+the stream.
+
+Reproduce the thresholds from `script/e2e-fastflowlm.sh` through the public endpoint: at
 least 5 delta events, at least 300 ms from first to last, and at least 80 ms worst-case gap. A
 buffered response lands within a few milliseconds and fails both.
 
-Confirm the runtime stayed private from an external host:
+### Persistence across a restart
+
+`/var/lib/companionai/data` has to survive a redeploy, which is why the install target is
+`/opt/companionai` and not a git working tree:
+
+```bash
+sudo ls -la /var/lib/companionai/data
+sudo systemctl restart companionai && sleep 15
+curl -sS -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8080/api/stats
+```
+
+### The runtime must be unreachable from outside
+
+FastFlowLM has no auth and no rate limit. With a public vhost now in front of CompanionAI, a
+reachable `:52625` is an open inference endpoint:
 
 ```bash
 curl -sS --max-time 5 http://<X1-PUBLIC-IP>:52625/v1/models    # must time out
 ```
+
+Run this from off-box — a phone on mobile data, not the X1 itself. A local run proves nothing,
+because the runtime is loopback-bound either way.
 
 ## Troubleshooting
 
@@ -376,32 +406,39 @@ it must not point into a developer's home directory.
 Symptom shape to recognise: exit 1 at ~11 ms CPU and ~3 MB peak memory. Tomcat never
 starts, so nothing about the app, the ports or FastFlowLM is implicated.
 
-### `nginx: [emerg] unknown directive "http2"`
-
-The config uses the standalone `http2 on;` form, which needs nginx 1.25.1 or newer. On an
-older release, fold it into the listen directive instead:
-
-```nginx
-listen 443 ssl http2;
-```
-
 ### `duplicate location /.well-known/acme-challenge/`
 
-A previous `certbot --nginx` run injected a challenge location next to the one already in
-`deploy/nginx/companionai.conf`. Delete the injected copy and use `--webroot` from step 6,
-which never touches the config.
+A previous `certbot --nginx` run injected a challenge location next to the one already in the
+site config. Delete the injected copy and renew with `--webroot`, which never edits the config.
 
 ### `nginx: [emerg] cannot load certificate ... No such file or directory`
 
-Not a missing-certificate bug to fix with a dummy self-signed cert. It is the bootstrap
-ordering, and `companionai.conf` cannot be loaded until the certificate exists while certbot
-cannot run until port 80 is serving. Start from `companionai-http.conf` (step 5), which has
-no certificate dependency.
+Two distinct causes, and the message is the same for both.
 
-Note that `nginx -t && systemctl reload` is what made this look worse than it was: when the
-test failed the reload never ran, so the running server still had no port 80 ACME location
-live. Check `systemctl status nginx` rather than assuming the config on disk is the config in
-memory.
+**A whole-server `companionai` site was installed.** It declared its own `server_name` and
+`ssl_certificate` pointing at a certificate that does not exist, and nginx treats a missing
+certificate as fatal — it refuses to start, so `nginx -t` fails and `systemctl reload` never
+runs. This is what happened when the app was first given a subdomain of its own.
+
+The fix is the one this runbook now uses: do not add a server block at all. `x1pro.runningcode.dev`
+already holds a certificate, so add only the location fragment. If a stray site file exists,
+remove it:
+
+```bash
+sudo rm -f /etc/nginx/sites-enabled/companionai /etc/nginx/sites-available/companionai
+```
+
+**A hostname was assumed rather than checked.** Certbot's `NXDOMAIN` on
+`companai.runningcode.dev` was not a DNS outage — that name never existed. The real hostname
+was `x1pro.runningcode.dev`. Confirm the name resolves before spending a certbot attempt:
+
+```bash
+dig +short A x1pro.runningcode.dev
+```
+
+Worth internalising: `nginx -t && systemctl reload` chains the two, so a failed test silently
+skips the reload and leaves the *previous* config running. Check `systemctl status nginx`
+rather than assuming the file on disk is the config in memory.
 
 ## Rollback
 
