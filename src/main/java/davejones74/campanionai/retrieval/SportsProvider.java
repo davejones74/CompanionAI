@@ -2,6 +2,7 @@ package davejones74.campanionai.retrieval;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
@@ -10,6 +11,7 @@ import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -28,6 +30,17 @@ public final class SportsProvider implements RetrievalProvider {
     /** Window either side of today for the fixtures lookup, in days. */
     private static final int LOOKBACK_DAYS = 60;
     private static final int LOOKAHEAD_DAYS = 45;
+
+    /** First month of a European season. API-Football's season is its starting year. */
+    private static final int SEASON_START_MONTH = 8;
+
+    /**
+     * API-Football season for a date, as the starting year. European seasons run
+     * August to May, so January still belongs to the previous year's season.
+     */
+    private static int seasonOf(LocalDate date) {
+        return date.getMonthValue() >= SEASON_START_MONTH ? date.getYear() : date.getYear() - 1;
+    }
 
     private static final Map<String, Integer> LEAGUES = Map.of(
             "premier league", 39,
@@ -119,10 +132,15 @@ public final class SportsProvider implements RetrievalProvider {
         // and the whole lookup fails rather than degrading. A from/to window is
         // accepted on every plan and gives us both halves of the answer in one call.
         LocalDate today = LocalDate.now();
-        String from = today.minusDays(LOOKBACK_DAYS).toString();
-        String to = today.plusDays(LOOKAHEAD_DAYS).toString();
-        JsonNode root = get("/fixtures?team=" + teamId + "&from=" + from + "&to=" + to);
-        JsonNode arr = root.path("response");
+        LocalDate from = today.minusDays(LOOKBACK_DAYS);
+        LocalDate to = today.plusDays(LOOKAHEAD_DAYS);
+        ArrayNode all = json.createArrayNode();
+        for (int season = seasonOf(from); season <= seasonOf(to); season++) {
+            JsonNode arr = get("/fixtures?team=" + teamId + "&season=" + season
+                    + "&from=" + from + "&to=" + to).path("response");
+            if (arr.isArray()) all.addAll((ArrayNode) arr);
+        }
+        JsonNode arr = all;
         StringBuilder out = new StringBuilder();
         JsonNode finished = null;
         JsonNode upcoming = null;
