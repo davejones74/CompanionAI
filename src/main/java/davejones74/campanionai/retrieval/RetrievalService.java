@@ -68,8 +68,35 @@ public final class RetrievalService {
             return new LiveContext(format(result), true, false);
         } catch (RetrievalException e) {
             LOG.warn("Live retrieval failed ({}) : {}", kind, String.valueOf(e.getMessage()));
+            // A sports provider on a plan that does not cover the current season
+            // fails every single time, which makes live sport permanently
+            // unanswerable through it. Web search covers the same ground well enough
+            // to be worth trying before giving up.
+            RetrievalKind fallbackKind = fallbackFor(kind);
+            RetrievalProvider fallback = fallbackKind == null ? null : providers.get(fallbackKind);
+            if (fallback != null && fallback.isConfigured()) {
+                LOG.info("Retrying {} as {}.", kind, fallbackKind);
+                RetrievalRequest retry = new RetrievalRequest(input, fallbackKind, location,
+                        Freshness.RECENT, cls.pastDays(), cls.team());
+                try {
+                    RetrievalResult result = fallback.retrieve(retry);
+                    if (!result.items().isEmpty()) {
+                        return new LiveContext(format(result), true, false);
+                    }
+                } catch (RetrievalException retryError) {
+                    LOG.warn("Fallback {} failed : {}", fallbackKind, String.valueOf(retryError.getMessage()));
+                }
+            }
             return new LiveContext(notice(e.userFacingMessage()), true, true);
         }
+    }
+
+    /**
+     * Where to retry a failed lookup. Only SPORTS falls back: web search has no
+     * stricter source to degrade to, and weather degrades to itself.
+     */
+    private static RetrievalKind fallbackFor(RetrievalKind kind) {
+        return kind == RetrievalKind.SPORTS ? RetrievalKind.WEB_SEARCH : null;
     }
 
     private static RetrievalKind toKind(Intent intent) {
