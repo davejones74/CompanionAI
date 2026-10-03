@@ -1,18 +1,55 @@
 # X1 Pro + FastFlowLM Phase 0 Validation Runbook
 
+> ## ⚠ No row in this document is `[VALIDATED]`
+>
+> **Nothing here has been run.** Every command is untested against real hardware and every value is
+> a placeholder or a vendor claim. This document is a procedure to be executed, not a description of
+> a system that exists. Do not cite it as deployment guidance, and do not treat any port, model tag,
+> benchmark figure or security conclusion in it as established.
+
 ## How to use this document
 
-**Nothing in this document asserts a result.** Every row is either a command to run or a question that has not yet been answered. This is the gate that must pass before any Java implementation work begins.
+**Nothing in this document asserts a result.** Every row is either a command to run or a question
+that has not yet been answered.
 
 Status markers match `LLM-Provider-Architecture.md`:
 
 | Marker | Meaning |
 |---|---|
-| `[VENDOR]` | Stated by upstream vendor documentation. A claim to be tested, not a measurement. |
+| `[IMPLEMENTED]` | Written in this repository, compiling, covered by tests. Not confirmed on hardware |
+| `[VENDOR]` | Stated by upstream vendor documentation. A claim to be tested, not a measurement |
 | `[VALIDATED]` | Confirmed on hardware. **No row currently holds this marker.** |
-| `[TBD]` | Unknown. Determined by the commands in this document. |
+| `[TBD]` | Unknown. Determined by the commands in this document |
 
-`[TBD]` **No version, port, model name, benchmark number, API capability or XDNA configuration is assumed anywhere in this document.** Where a value is needed, the document tells you how to discover it rather than what it is.
+No version, port, model name, benchmark number, API capability or XDNA configuration is assumed
+anywhere in this document. Where a value is needed, the document tells you how to discover it rather
+than what it is.
+
+### What this document does and does not gate
+
+The implementation of the provider abstraction (Phases 1–3 of `LLM-Provider-Architecture.md` §6) was
+**allowed to proceed without this validation**, on operator instruction. That is a deliberate,
+documented relaxation: the abstraction is runtime-neutral and its correctness is established by
+`OpenAiCompatTransportTest` against a stub, not by this hardware.
+
+This document still gates everything that would become a **claim about the X1 Pro**: performance
+figures, the chosen model, the port, firewall and systemd configuration, and any statement that
+the deployment is production-ready. See `LLM-Provider-Architecture.md` §6.1.
+
+---
+
+# 0. Running the probes
+
+Part A is committed as a script so it is version-controlled and repeatable. It is **read-only**:
+it changes no configuration, downloads no models and starts no services.
+
+```bash
+bash docs/x1-validate-part-a.sh 2>&1 | tee x1-a.log
+```
+
+It covers Blocks 1–3 and 4.1 (catalogue discovery). Blocks 4–8 are deliberately **not** scripted,
+because their commands must embed the port and model tag this run discovers rather than assume them.
+Paste the Part A output back and Part B follows.
 
 ---
 
@@ -118,7 +155,7 @@ echo "--- xrt-smi examine exit code: $? ---"
 
 # 5. Block 4 — Execute a model on the NPU
 
-This is the real gate. A successful `flm validate` is necessary but not sufficient.
+This is the decisive hardware gate. A successful `flm validate` is necessary but not sufficient.
 
 ### 5.1 Discover the catalogue
 
@@ -205,7 +242,9 @@ curl -s -w '\nHTTP %{http_code}\n' "$BASE/chat/completions" \
 | F4 | R10 | `GET /v1/models` returns a list; confirm the served model tag matches what `flm run` accepted |
 | F5 | Q6 | `"think"` field accepted; determine whether reasoning text appears in the response and where |
 
-`[TBD]` F2 is the highest-risk probe. `[CURRENT]` CompanionAI's current client expects NDJSON with a `done` flag (`LlmClient.java:129,136-139`), not SSE. If FastFlowLM emits SSE, that is an expected migration, handled entirely inside the shared transport.
+`[TBD]` F2 is the highest-risk probe. `[IMPLEMENTED]` CompanionAI's shared transport accepts both SSE
+`data:` frames and bare JSON lines, so either result is handled without a code change — but the
+result still determines which framing is actually in use and must be recorded.
 
 ### 6.2 Exposure checks — run with defaults
 
@@ -291,7 +330,9 @@ curl -s -w '\nHTTP %{http_code}\n' "$BASE/chat/completions" \
   -d "{\"model\":\"$MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"options\":{\"num_ctx\":4096}}"
 ```
 
-`[TBD]` Record the A2 output verbatim. `[CURRENT]` The production replacement for A2 is a shared SSE transport, so confirming Ollama's `/v1` streaming framing is as important as confirming FastFlowLM's.
+`[TBD]` Record the A2 output verbatim. `[IMPLEMENTED]` The production replacement for A2 is a shared
+transport that tolerates both framings, so the A2 result determines what is actually in use rather
+than whether a code change is needed.
 
 ---
 
@@ -455,7 +496,13 @@ Top RSS processes:          <verbatim>
 
 # 12. Phase 0 exit criteria
 
-Phase 0 is complete only when **all** of the following are `[VALIDATED]`. Until then, no Java implementation work begins.
+Phase 0 is complete only when **all** of the following are `[VALIDATED]`. Until then, **nothing about
+the X1 Pro may be asserted, deployed or benchmarked** — no port, no model, no performance figure, no
+security configuration.
+
+This no longer blocks writing the provider abstraction, which was permitted to proceed under the
+Gate A / Gate B split described in `LLM-Provider-Architecture.md` §6.1. It continues to block every
+claim in the table below.
 
 | # | Criterion | Block |
 |---:|---|---|

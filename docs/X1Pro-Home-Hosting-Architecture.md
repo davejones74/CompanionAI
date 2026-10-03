@@ -1195,9 +1195,14 @@ Verification:          <commands proving loopback-only>
 | 4 | Provider tests; `llmBench` / `llmParity`; run on both hosts | Bake-off complete |
 | 5 | `script/run.sh` consolidation; service unit and firewall for FastFlowLM | Acceptance criteria met |
 
-`[PLANNED]` Deployment sequencing. FastFlowLM must be proven working on the X1 Pro **before** CompanionAI is pointed at it. If CompanionAI is deployed first, it stays on Ollama until Phase 0 exits.
+`[PLANNED]` Deployment sequencing. FastFlowLM must be proven working on the X1 Pro **before** CompanionAI is pointed at it in anger. If CompanionAI is deployed first, it stays on Ollama until Phase 0 exits.
 
-`[PLANNED]` No Java implementation work begins until the Phase 0 gate is satisfied. The project's working rule applies: do not rewrite the application around a runtime that has not yet been shown to execute a model on the target hardware.
+`[IMPLEMENTED]` The provider abstraction itself was **not** held behind this gate. Writing a
+runtime-neutral boundary introduces no assumption about the target host, so it was allowed to
+proceed and is covered by tests against a stub. What remains gated is every deployment and
+performance decision below — see `LLM-Provider-Architecture.md` §6.1 for the Gate A / Gate B split.
+In particular, the firewall, socket and systemd decisions in §22 stay `[TBD]` until the bind address
+is observed.
 
 ---
 

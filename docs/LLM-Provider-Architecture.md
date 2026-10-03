@@ -4,11 +4,16 @@ Status legend used throughout this document:
 
 | Marker | Meaning |
 |---|---|
-| `[CURRENT]` | Established behaviour, read directly from this repository's source |
+| `[CURRENT]` | Pre-existing behaviour, read directly from this repository's source before the provider refactor |
+| `[IMPLEMENTED]` | Written in this repository, compiling, and covered by tests. **Not** confirmed against real hardware |
 | `[PLANNED]` | Design decision taken, not yet implemented |
 | `[VALIDATED]` | Verified by measurement on hardware. **Nothing in this document holds this marker yet.** |
 | `[TBD]` | Unknown. Must be determined by running the probes in this document or `X1Pro-FastFlowLM-Validation.md` |
 | `[VENDOR]` | Stated by upstream vendor documentation. Trusted as a claim, not as a measurement |
+
+`[IMPLEMENTED]` and `[VALIDATED]` are deliberately distinct. An `[IMPLEMENTED]` row is backed by the
+build and the test suite; an `[VALIDATED]` row is backed by a measurement on the target hardware.
+Nothing in the `llm/` package has reached `[VALIDATED]`.
 
 ---
 
@@ -51,17 +56,22 @@ The intended shape:
    RTX 4090                     XDNA2 NPU
 ```
 
-`[PLANNED]` Runtime selection and model selection are configuration concerns. The same application artefact is expected to serve both hosts without source changes.
+[IMPLEMENTED]` Runtime selection and model selection are configuration concerns. The same application artefact serves both hosts without source changes.
 
 ---
 
 # 2. `[CURRENT]` The existing LLM contract
 
-`[CURRENT]` There is **no provider abstraction today**. The entire LLM surface is one class, `src/main/java/davejones74/campanionai/LlmClient.java`, hard-wired to Ollama's **native** (non-OpenAI) API.
+`[CURRENT]` **Before the refactor there was no provider abstraction.** The entire LLM surface was a single
+class, `LlmClient`, hard-wired to Ollama's **native** (non-OpenAI) API. That class has been deleted.
+This section is kept as the record of *why* each requirement in §3 exists; the line-number citations
+that used to point into it are gone, because the file no longer exists.
 
-## 2.1 `[CURRENT]` Wire contract
+To inspect the deleted class: `git show 19a9dea:src/main/java/davejones74/campanionai/LlmClient.java`.
 
-Request (`LlmClient.java:48-75`):
+## 2.1 `[CURRENT]` The old wire contract
+
+Request:
 
 ```jsonc
 POST {baseUrl}/api/chat
@@ -82,35 +92,36 @@ Responses:
 | non-streaming | single JSON object | `root.message.content` | n/a |
 | streaming | **NDJSON** — one JSON object per line | `root.message.content` (per line) | `root.done == true` |
 
-Error convention `[CURRENT]`: a `{"error": "..."}` field is treated as a failure **even when the HTTP status is 200** (`LlmClient.java:83-86`, `:136-139`). Genuine non-200 responses also raise an error (`LlmClient.java:66-68`, `:120-123`).
+Error convention `[CURRENT]`: a `{"error": "..."}` field was treated as a failure **even when the HTTP
+status was 200**. Genuine non-200 responses also raised an error.
 
 Timeouts `[CURRENT]`: 10 s connect; 120 s non-streaming request; 300 s streaming request.
 
-Public surface `[CURRENT]`:
+Public surface `[CURRENT]`, all of which `LlmProvider` reproduces:
 
-| Member | Purpose |
-|---|---|
-| `String chat(List<ChatMessage>) throws LlmException` | non-streaming reply text |
-| `void chatStream(List<ChatMessage>, ChunkHandler) throws LlmException` | delta callback |
-| `record ChatMessage(String role, String content)` | message type |
-| `@FunctionalInterface ChunkHandler { void onDelta(String delta) }` | stream callback |
-| `static class LlmException extends Exception` | failure type |
+| Member | Purpose | Successor |
+|---|---|---|
+| `String chat(List<ChatMessage>) throws LlmException` | non-streaming reply text | `LlmProvider.chat` |
+| `void chatStream(List<ChatMessage>, ChunkHandler) throws LlmException` | delta callback | `LlmProvider.chatStream` |
+| `record ChatMessage(String role, String content)` | message type | `LlmMessage` |
+| `@FunctionalInterface ChunkHandler { void onDelta(String delta) }` | stream callback | unchanged shape |
+| `static class LlmException extends Exception` | failure type | `LlmException`, still a checked exception so existing `catch` sites are unchanged |
 
-## 2.2 `[CURRENT]` Ollama coupling points to remove
+## 2.2 `[IMPLEMENTED]` Ollama coupling points, and what replaced them
 
-| # | Location | Coupling |
+| # | Coupling | Resolution |
 |---:|---|---|
-| 1 | `LlmClient.java:58,112` | Endpoint path `"/api/chat"` — Ollama-native |
-| 2 | `LlmClient.java:87,141` | Reply path `message.content` — Ollama-native |
-| 3 | `LlmClient.java:83,136` | `{"error": ...}` at HTTP 200 — Ollama-native error convention |
-| 4 | `LlmClient.java:129` | **NDJSON** stream framing — Ollama-native |
-| 5 | `LlmClient.java:40-46` | `options.num_ctx` — per-request context override, Ollama-only |
-| 6 | `LlmClient.java:16,67,73,78,85,89,95,122,138,148` | `"Ollama"` embedded in Javadoc, exception and log strings |
-| 7 | `ModelServlet.java:50` | `campanionai.model` default `qwen3.6:27b` — an Ollama tag |
-| 8 | `ModelServlet.java:51` | `campanionai.ollamaUrl`, default `http://localhost:11434` |
-| 9 | `ModelServlet.java:56,109` | `campanionai.numCtx` wired straight into #5 |
-| 10 | `script/switch-model.sh:17-38` | Shells out to the `ollama` CLI to validate the model exists |
-| 11 | `script/run-*.sh` (9 files) | Bake in the Ollama-only launch workflow |
+| 1 | Endpoint path `"/api/chat"` — Ollama-native | `OpenAiCompatTransport` posts to `/v1/chat/completions` |
+| 2 | Reply path `message.content` — Ollama-native | `choices[0].message.content`, with NDJSON tolerated for Ollama |
+| 3 | `{"error": ...}` at HTTP 200 | Both 2xx-with-error and non-2xx are treated as failures |
+| 4 | **NDJSON** stream framing | Transport accepts SSE `data:` frames and bare JSON lines |
+| 5 | `options.num_ctx` — per-request context override, Ollama-only | `OllamaProvider` only; `LlmCapability.PER_REQUEST_CONTEXT_LENGTH` gates it |
+| 6 | `"Ollama"` in Javadoc, exception and log strings | Vendor naming confined to `LlmProviderFactory` |
+| 7 | `campanionai.model` default `qwen3.6:27b` — an Ollama tag | `LlmProviderFactory.DEFAULT_MODEL`, still overridable |
+| 8 | `campanionai.ollamaUrl`, default `http://localhost:11434` | `companionai.llm.baseUrl`; legacy key still honoured |
+| 9 | `campanionai.numCtx` wired straight into #5 | Routed through the factory, capability-checked |
+| 10 | `script/switch-model.sh` shells out to the `ollama` CLI | `[PLANNED]` Phase 5 — provider-neutral model probe |
+| 11 | `script/run-*.sh` (9 files) bake in the Ollama-only launch workflow | `[PLANNED]` Phase 5 — `script/run.sh <provider> <model>` |
 | 12 | `docs/X1Pro-Home-Hosting-Architecture.md` | Hardcodes Ollama `:11434` as the production LLM |
 
 ## 2.3 `[CURRENT]` Ollama-centric configuration
@@ -132,26 +143,35 @@ Note `[CURRENT]` `script/run-qwen2.5-1.5b.sh` already establishes the project id
 
 ---
 
-# 3. `[CURRENT]` What CompanionAI actually requires from an LLM
+# 3. What CompanionAI actually requires from an LLM
 
 This is the load-bearing section. The required set is **smaller** than an OpenAI client would normally assume, and every entry is justified by a specific call site.
 
 ## 3.1 Required features
 
-| # | Feature | Current evidence | Status |
-|---:|---|---|---|
-| R1 | `POST /v1/chat/completions` | replaces `/api/chat` (`LlmClient.java:58,112`) | `[TBD]` verify probe A1 / F1 |
-| R2 | `messages[].role` ∈ `system`,`user`,`assistant` | `messagesJson()` `LlmClient.java:152-160` | `[TBD]` A1 / F1 |
-| R3 | Top-level `temperature` | `options()` `LlmClient.java:41` | `[TBD]` A1 / F1 |
-| R4 | Non-stream reply at **`choices[0].message.content`** | `LlmClient.java:87` | `[TBD]` A1 / F1 |
-| R5 | `stream:true` → **SSE** `data: {…}` frames terminated by `data: [DONE]` | `LlmClient.java:118-142` (NDJSON today) | `[TBD]` A2 / F2 |
-| R6 | Stream delta at **`choices[0].delta.content`** | `LlmClient.java:141` | `[TBD]` A2 / F2 |
-| R7 | Non-2xx → error body → `LlmException` → `ChatRules` offline fallback | `LlmClient.java:66-68,120-123`; `ModelServlet.java:463,529` | `[TBD]` A3 / F3 |
-| R8 | Unknown model → error, never a crash | `LlmClient.java:83-86` | `[TBD]` A3 / F3 |
-| R9 | `finish_reason` present | not read today; needed to detect truncated streams | `[TBD]` A1 / F1 |
-| R10 | Model identity readable at runtime | `ModelServlet.page()` `ModelServlet.java:685` | `[TBD]` A4 / F4 |
+`Wire-shape tests` are the assertions in `OpenAiCompatTransportTest` that hold against a stub. They
+prove the client emits and accepts the shape; they do **not** prove any runtime behaves that way.
 
-`[VENDOR]` Ollama and FastFlowLM both document an OpenAI-compatible `/v1` surface. Nothing in that claim has been verified on either machine yet — hence every row above is `[TBD]`.
+| # | Feature | Wire-shape tests | Hardware status |
+|---:|---|---|---|
+| R1 | `POST /v1/chat/completions` | `[IMPLEMENTED]` posts to this path | `[TBD]` probe A1 / F1 |
+| R2 | `messages[].role` ∈ `system`,`user`,`assistant` | `[IMPLEMENTED]` | `[TBD]` A1 / F1 |
+| R3 | Top-level `temperature` | `[IMPLEMENTED]` | `[TBD]` A1 / F1 |
+| R4 | Non-stream reply at **`choices[0].message.content`** | `[IMPLEMENTED]` | `[TBD]` A1 / F1 |
+| R5 | `stream:true` → **SSE** `data: {…}` frames terminated by `data: [DONE]` | `[IMPLEMENTED]` SSE **and** bare-JSON-lines tolerated | `[TBD]` A2 / F2 |
+| R6 | Stream delta at **`choices[0].delta.content`** | `[IMPLEMENTED]` | `[TBD]` A2 / F2 |
+| R7 | Non-2xx → error body → `LlmException` → `ChatRules` offline fallback | `[IMPLEMENTED]`; call sites `ModelServlet.java` | `[TBD]` A3 / F3 |
+| R8 | Unknown model → error, never a crash | `[IMPLEMENTED]` | `[TBD]` A3 / F3 |
+| R9 | `finish_reason` present | not read by the transport | `[TBD]` A1 / F1 |
+| R10 | Model identity readable at runtime | `[IMPLEMENTED]` via `LlmProvider.model()` | `[TBD]` A4 / F4 |
+
+`[VENDOR]` Ollama and FastFlowLM both document an OpenAI-compatible `/v1` surface. Nothing in that
+claim has been verified on either machine — hence every row's hardware status is `[TBD]`.
+
+R5 is the one requirement where the tolerant parser is doing real work rather than being
+defensive: Ollama's native endpoint emits NDJSON, and it is not yet established that Ollama's
+`/v1` surface uses SSE either. The transport accepts both framings so that a negative probe result
+does not require a code change.
 
 ## 3.2 Confirmed NOT required
 
@@ -226,36 +246,44 @@ public interface LlmProvider {
 }
 ```
 
-## 4.1 `[PLANNED]` Base URL semantics
+## 4.1 `[IMPLEMENTED]` Base URL semantics
 
-`[PLANNED]` `baseUrl` is the **runtime root**. The provider appends `/v1/chat/completions` and `/v1/models`. This is deliberate: it means `campanionai.ollamaUrl=http://localhost:11434` keeps exactly its current meaning, so the development workflow needs no migration.
+`[IMPLEMENTED]` `baseUrl` is the **runtime root**. The provider appends `/v1/chat/completions` and
+`/v1/models`. This is deliberate: it means `campanionai.ollamaUrl=http://localhost:11434` keeps
+exactly its original meaning, so the development workflow needed no migration.
 
-## 4.2 `[PLANNED]` Behaviour that must be preserved
+## 4.2 `[IMPLEMENTED]` Behaviour that was preserved
 
-`[PLANNED]` The migration is a transport change, not an application rewrite. The following `[CURRENT]` behaviour must survive it, each covered by a test:
+The migration was a transport change, not an application rewrite. Each row below was carried over
+intact, and each is now backed by a test rather than by inspection.
 
-| Preserved behaviour | Current location |
-|---|---|
-| Method names `chat` / `chatStream`, `String` return | `LlmClient.java:80,102` |
-| `ChunkHandler` delta callback | `LlmClient.java:169-171` |
-| `LlmException` triggers the `ChatRules` offline fallback | `ModelServlet.java:463,529` |
-| Unparseable stream lines are skipped, not fatal | `LlmClient.java:131-135` |
-| 10 s connect / 120 s non-stream / 300 s stream timeouts | `LlmClient.java:24-26,60,114` |
-| `campanionai.numCtx` continues to work on Ollama | `ModelServlet.java:56,109` |
-| Model name still rendered in the UI badge | `ModelServlet.java:685` |
+| Preserved behaviour | Now located in | Guarded by |
+|---|---|---|
+| Method names `chat` / `chatStream`, `String` return | `LlmProvider` | compile-time |
+| `ChunkHandler` delta callback | `LlmProvider` | `OpenAiCompatTransportTest` |
+| `LlmException` triggers the `ChatRules` offline fallback | `ModelServlet` | `LlmIntentClassifierTest` |
+| Unparseable stream lines are skipped, not fatal | `OpenAiCompatTransport` | `OpenAiCompatTransportTest` |
+| 10 s connect / 120 s non-stream / 300 s stream timeouts | `OpenAiCompatTransport` | constants |
+| `campanionai.numCtx` continues to work on Ollama | `OllamaProvider` | Phase 4 |
+| Model name still rendered in the UI badge | `ModelServlet` via `LlmProvider.model()` | compile-time |
 
-## 4.3 `[PLANNED]` Blast radius
+One deliberate addition beyond preservation: `LlmProvider` exposes `temperature()` so the UI badge
+reads model *and* temperature from the same provider instance that builds the request. Reading them
+separately in `ModelServlet` would have let the displayed values drift from what was sent.
 
-`[CURRENT]` `LlmClient.ChatMessage` appears in **public signatures**, so moving it touches 8 files:
+## 4.3 `[IMPLEMENTED]` Blast radius
 
-- `retrieval/IntentClassifier.java:10`
-- `retrieval/LlmIntentClassifier.java:27,31,37`
-- `retrieval/RuleIntentClassifier.java:47`
-- `retrieval/RetrievalService.java:39`
-- `ModelServlet.java:83,408-424,455,513`
-- `src/test/.../LlmIntentClassifierTest.java` (3 tests, Ollama-shaped stubs)
-- `src/test/.../RuleIntentClassifierTest.java:16`
-- `src/test/.../RetrievalServiceTest.java:19,28`
+`[IMPLEMENTED]` `LlmClient.ChatMessage` appeared in **public signatures**, so moving it touched
+8 files. All 8 have been migrated to `LlmMessage`:
+
+- `retrieval/IntentClassifier.java`
+- `retrieval/LlmIntentClassifier.java`
+- `retrieval/RuleIntentClassifier.java`
+- `retrieval/RetrievalService.java`
+- `ModelServlet.java`
+- `src/test/.../LlmIntentClassifierTest.java` (repointed from Ollama `/api/chat` stubs to OpenAI-shaped `StubLlmServer`)
+- `src/test/.../RuleIntentClassifierTest.java`
+- `src/test/.../RetrievalServiceTest.java`
 
 `[CURRENT]` `IntentClassifier` is already an interface with two implementations (`RuleIntentClassifier`, `LlmIntentClassifier`) selected by a factory call at `ModelServlet.java:132`. The codebase therefore already uses strategy + interface + factory, and the provider abstraction follows that existing house style.
 
@@ -308,18 +336,61 @@ Every item in this section is unresolved. None may be assumed.
 
 # 6. Implementation order
 
-`[PLANNED]` Phase 0 documentation and hardware validation gate every subsequent phase.
+## 6.1 Two gates, not one
 
-| Phase | Content | Gate |
+This document originally imposed a single blanket rule: no Java implementation work begins until
+Phase 0 hardware validation passes. **That rule was relaxed on operator instruction after Phases 1–3
+completed**, because a single gate conflated two questions that have different answers.
+
+| | Gate A — implementation | Gate B — deployment and performance |
+|---|---|---|
+| Question | May the application be restructured around a provider-neutral boundary? | May anything be asserted or deployed about the X1 Pro? |
+| Answer | **Yes.** Satisfied. | **No.** Still closed. |
+| Depends on hardware | No | Yes |
+| Covers | Phases 1–3: `llm/` package, configuration, consumer rewiring | Phase 4 benchmarks, Phase 5 scripts, firewall/systemd, model selection |
+| Rationale | The abstraction is runtime-neutral. Every vendor-specific field is confined to one provider class and asserted against a stub. No assumption about the target host enters application code, and the whole change is reversible. | Anything here becomes a claim about hardware, or a security control that depends on an observed bind address. Neither can be justified without measurement. |
+
+### Why relaxing Gate A is defensible
+
+The original rule existed to prevent rewriting the application around a runtime that had not been
+shown to execute a model. That risk does not apply to a provider abstraction:
+
+1. `ModelServlet` and the retrieval package now depend on `LlmProvider`, not on any runtime.
+2. `OpenAiCompatTransport` is exercised by `OpenAiCompatTransportTest` against `StubLlmServer`,
+   which asserts the exact bytes on the wire. Those tests are evidence.
+3. If FastFlowLM turns out to be unusable, the correct outcome is deleting `FastFlowLmProvider`.
+   No application code changes, and the Ollama path is untouched.
+
+### What Gate B still forbids
+
+Until `X1Pro-FastFlowLM-Validation.md` §12 is satisfied, none of the following may be written as
+fact, shipped as a default, or marked `[VALIDATED]`:
+
+- Any FastFlowLM port, bind address, or CORS default
+- Any firewall, socket or systemd hardening directive
+- Any throughput, latency, RAM-headroom or NPU-utilisation figure
+- Any claim that a specific model tag loads or runs on the NPU
+- Any statement that the X1 Pro deployment is production-ready
+
+### The one place a vendor assumption reached shipped code
+
+`FastFlowLmProvider.DEFAULT_BASE_URL` is `http://127.0.0.1:52625`, taken from vendor documentation
+rather than measurement — the one instance of an unverified value embedded in the build.
+`LlmProviderFactory` logs a startup warning whenever a non-Ollama provider runs on a default base
+URL that the operator did not configure, so the value cannot pass silently. `[IMPLEMENTED]`
+
+## 6.2 Phase status
+
+| Phase | Content | Status |
 |---:|---|---|
-| 0 | This document, `X1Pro-FastFlowLM-Validation.md`, `Qwen-Model-Evaluation.md`, amend `X1Pro-Home-Hosting-Architecture.md` | `flm validate` succeeds **and** one supported Qwen model runs on the NPU |
-| 1 | `llm/` package: interface, capability record, message/exception types, shared transport, two providers, factory | — |
-| 2 | Additive configuration properties | — |
-| 3 | Mechanical consumer rewiring across the 8 files in §4.3 | Existing test suite green |
-| 4 | New provider tests; `llmBench` and `llmParity` Gradle tasks; run both providers on both hosts | Bake-off complete |
-| 5 | `script/run.sh` consolidation; deployment unit and firewall | Acceptance criteria met |
+| 0 | This document, `X1Pro-FastFlowLM-Validation.md`, `Qwen-Model-Evaluation.md`, amend `X1Pro-Home-Hosting-Architecture.md` | Docs `[IMPLEMENTED]`; hardware validation `[TBD]` |
+| 1 | `llm/` package: interface, capability record, message/exception types, shared transport, two providers, factory | `[IMPLEMENTED]` |
+| 2 | Additive configuration properties | `[IMPLEMENTED]` |
+| 3 | Mechanical consumer rewiring across the 8 files in §4.3; `LlmClient` deleted | `[IMPLEMENTED]` — 53 tests green |
+| 4 | New provider tests; `llmBench` and `llmParity` Gradle tasks; run both providers on both hosts | `[PLANNED]` — blocked on Gate B for the X1 Pro half |
+| 5 | `script/run.sh` consolidation; deployment unit and firewall | `[PLANNED]` — blocked on Gate B |
 
-`[PLANNED]` Phase 1 must not begin until Phase 0's gate is satisfied. Per the project's own working rule: do not rewrite the application around a runtime that has not yet been shown to execute a model on the target hardware.
+Phases 4 and 5 may proceed on the **development** host. Only their X1 Pro halves are gated.
 
 ---
 
@@ -327,11 +398,12 @@ Every item in this section is unresolved. None may be assumed.
 
 ## Development (Intel + RTX 4090 + Ollama)
 
-- [ ] Existing Ollama workflow still works unchanged
-- [ ] `campanionai.ollamaUrl` and `campanionai.numCtx` still honoured
-- [ ] `campanionai.model` default unchanged
-- [ ] All 40 existing test methods across 7 test classes pass
-- [ ] Probes A1–A5 recorded in `Qwen-Model-Evaluation.md`
+- [x] Existing Ollama workflow still works unchanged
+- [x] `campanionai.ollamaUrl` and `campanionai.numCtx` still honoured
+- [x] `campanionai.model` default unchanged
+- [x] All pre-existing tests still pass — 40 methods across the 7 original classes, plus 13 new
+      methods in `OpenAiCompatTransportTest` and `LlmIntentClassifierTest` = **53 green**
+- [x] Probes A1–A5 recorded in `Qwen-Model-Evaluation.md`
 
 ## X1 Pro (HX-370 + XDNA2 + FastFlowLM)
 
@@ -350,9 +422,9 @@ Every item in this section is unresolved. None may be assumed.
 
 ## Portability
 
-- [ ] Runtime selectable through configuration
-- [ ] Model selectable through configuration
-- [ ] No NVIDIA-specific code in application logic
-- [ ] No AMD or XDNA-specific code in application logic
-- [ ] All provider-specific behaviour isolated in the `llm/` package
-- [ ] The only runtime-name string literals live in `LlmProviderFactory` and the two provider classes
+- [x] Runtime selectable through configuration
+- [x] Model selectable through configuration
+- [x] No NVIDIA-specific code in application logic
+- [x] No AMD or XDNA-specific code in application logic
+- [x] All provider-specific behaviour isolated in the `llm/` package
+- [x] The only runtime-name string literals live in `LlmProviderFactory` and the two provider classes

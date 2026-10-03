@@ -4,15 +4,18 @@
 
 Select the Qwen model that CompanionAI will use in production on the Minisforum X1 Pro, and select the production context budget that goes with it.
 
-**This document is currently a test plan only. It contains no results.** Results are added only after the Phase 0 hardware gate in `X1Pro-FastFlowLM-Validation.md` is satisfied.
+**This document is a test plan plus the completed development-host API probes (§6). It contains no
+X1 Pro results and no benchmark numbers.** The X1 Pro measurements are added only after the Phase 0
+hardware validation in `X1Pro-FastFlowLM-Validation.md` is satisfied.
 
 Status markers match `LLM-Provider-Architecture.md`:
 
 | Marker | Meaning |
 |---|---|
-| `[CURRENT]` | Established behaviour, read from this repository's source |
+| `[CURRENT]` | Pre-existing behaviour, read from this repository's source |
+| `[IMPLEMENTED]` | In this repository, compiling, test-covered. Not confirmed on hardware |
 | `[VENDOR]` | Stated by upstream vendor documentation. A claim to be tested. |
-| `[VALIDATED]` | Measured on hardware. **No row currently holds this marker.** |
+| `[VALIDATED]` | Measured on hardware. |
 | `[TBD]` | Unknown. Determined by the harness described here. |
 
 ---
@@ -353,3 +356,63 @@ Any of the following voids the result entirely:
 - Baseline RAM not recorded before the model loaded
 - Fewer than the required repetitions, or warm-up included in the statistics
 - Results collected before the Phase 0 hardware gate passed
+---
+
+# 6. `[VALIDATED]` Development-host API probes — Ollama
+
+These are the **A1–A5** probes from `X1Pro-FastFlowLM-Validation.md` Block 7, run against the
+development host. They are genuine measurements: recorded from command output, not inferred from
+documentation. They are the first `[VALIDATED]` rows in this document, and they validate the
+**development** runtime only.
+
+## 6.1 Environment
+
+| Item | Value |
+|---|---|
+| Date | 2026-10-03 |
+| Ollama version | `ollama version is 0.35.0` |
+| Endpoint | `http://127.0.0.1:11434/v1` |
+| Listen address | `127.0.0.1` — **loopback only**, not `0.0.0.0` |
+| Models present | `qwen2.5:1.5b`, `qwen2.5:14b`, `qwen2.5-coder:14b`, `qwen3.6:27b`, `gemma4:12b`, `deepseek-r1:14b`, `deepseek-r1:32b`, `deepseek-r1:latest`, `llama3.1:8b` |
+
+## 6.2 Probe results
+
+| Probe | Tests | Result | Verdict |
+|---|---|---|---|
+| A4 | R10 | `GET /v1/models` → HTTP 200, 9 models listed | `[VALIDATED]` |
+| A1 | R1, R2, R3, R4, R9 | HTTP 200; reply `Ok.` at `choices[0].message.content`; `finish_reason: "stop"`; `system` role accepted; top-level `temperature` accepted | `[VALIDATED]` |
+| A2 | R5, R6 | **SSE**: 11/11 frames prefixed `data: `, delta at `choices[0].delta.content`, terminated by `data: [DONE]` | `[VALIDATED]` |
+| A3 | R7, R8 | **HTTP 404** with parseable body `{"error":{"message":"model '__definitely_not_loaded__' not found",...}}`; server did not hang | `[VALIDATED]` |
+| A5 | Ollama-only | `options.num_ctx: 4096` → HTTP 200, accepted | `[VALIDATED]` |
+
+## 6.3 End-to-end check through the real provider
+
+Beyond raw `curl`, `OllamaProvider` was driven directly against the live endpoint:
+
+| Call | Output |
+|---|---|
+| `chat(...)` with `system` + `user` | `Ok.` |
+| `chatStream(...)` | `1, 2, 3, 4, 5` — all 5 deltas reassembled in order |
+| `chat(...)` with unknown model | `LlmException: Ollama returned HTTP 404: {"error":{"message":"model '__definitely_not_loaded__' not found",...}}` |
+
+## 6.4 What these results changed
+
+1. **R5/R6 are settled for Ollama, and the answer is SSE — not NDJSON.** The tolerant parser is
+   therefore *not* masking a mismatch on the development path: Ollama's `/v1` surface is genuinely
+   OpenAI-compatible. The NDJSON tolerance remains as defence for FastFlowLM, whose framing is still
+   `[TBD]`.
+2. **Ollama's `/v1` error convention is stricter than the old native API.** The native endpoint
+   could return `{"error": "..."}` with HTTP **200**; the `/v1` surface returns a proper non-2xx
+   status. `OpenAiCompatTransport` still checks both, so it is correct either way, but the
+   status-code path is the one that actually fires here.
+3. **Ollama binds loopback only.** Recorded because it is the useful contrast case for the
+   FastFlowLM bind-address question, which is `[TBD]`. A loopback-only Ollama requires no firewall
+   rule; a `0.0.0.0` FastFlowLM would require one.
+
+## 6.5 Not validated here
+
+- Anything about the X1 Pro, FastFlowLM, or the NPU.
+- Throughput, latency or memory. The probes above are **correctness** checks on request and
+  response shape. `llmBench` does not exist yet and no timing figure has been measured.
+- Whether `options.num_ctx` was *honoured* as a context length, as opposed to merely accepted —
+  confirming that needs a long-context request, not a `hi`.

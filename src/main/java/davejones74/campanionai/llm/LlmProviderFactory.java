@@ -53,15 +53,36 @@ public final class LlmProviderFactory {
         double temperature = decimal(lookup(TEMPERATURE_KEYS, "LLM_TEMPERATURE"), DEFAULT_TEMPERATURE);
         Integer numCtx = integer(lookup(NUM_CTX_KEYS, "LLM_NUM_CTX"));
         boolean think = bool(lookup(THINK_KEYS, "LLM_THINK"), false);
+        String configuredBaseUrl = explicitBaseUrl(providerName);
 
-        String baseUrl = resolveBaseUrl(providerName, lookup(BASE_URL_KEYS, "LLM_BASE_URL"));
+        String baseUrl = resolveBaseUrl(providerName, configuredBaseUrl);
         LlmProvider provider = create(providerName, baseUrl, model, temperature, numCtx, think);
 
         if (numCtx != null && !provider.capabilities().has(LlmCapability.PER_REQUEST_CONTEXT_LENGTH)) {
             LOG.warn("{} does not support a per-request context length; ignoring {}.",
                     provider.providerName(), NUM_CTX_KEYS[1]);
         }
+        warnIfBaseUrlIsUnverified(providerName, configuredBaseUrl, provider);
         return provider;
+    }
+
+    /**
+     * Warns when a non-default runtime is being used without an explicitly configured base URL.
+     *
+     * <p>Ollama's default needs no warning: it has been the development runtime throughout, so the
+     * value is long-standing and overridable by a key that predates this package. Every other
+     * runtime's default comes from vendor documentation and has not been observed on real
+     * hardware, so silently falling back to it would let an unverified value masquerade as a
+     * configured one.
+     */
+    private static void warnIfBaseUrlIsUnverified(String providerName, String configuredBaseUrl, LlmProvider provider) {
+        if (!isBlank(configuredBaseUrl) || DEFAULT_PROVIDER.equals(normalize(providerName))) {
+            return;
+        }
+        LOG.warn("No base URL configured for provider '{}'; using the vendor-documented default {}. "
+                        + "That default is NOT validated against real hardware and may be wrong for the "
+                        + "installed release. Set {} (or {}) to the observed value.",
+                provider.providerName(), provider.baseUrl(), BASE_URL_KEYS[0], "LLM_BASE_URL");
     }
 
     public static LlmProvider create(String providerName,
@@ -85,18 +106,27 @@ public final class LlmProviderFactory {
         };
     }
 
+    /**
+     * Returns the base URL the operator actually asked for, or {@code null} if they did not ask
+     * for one. The legacy Ollama key counts as an explicit choice, since it predates this package
+     * and existing deployments already set it.
+     */
+    private static String explicitBaseUrl(String providerName) {
+        String configured = lookup(BASE_URL_KEYS, "LLM_BASE_URL");
+        if (!isBlank(configured)) {
+            return configured;
+        }
+        if (DEFAULT_PROVIDER.equals(normalize(providerName))) {
+            return System.getProperty(LEGACY_OLLAMA_URL_KEY);
+        }
+        return null;
+    }
+
     private static String resolveBaseUrl(String providerName, String configured) {
         if (!isBlank(configured)) {
             return configured.trim();
         }
-        String name = normalize(providerName);
-        if (name == null) {
-            name = DEFAULT_PROVIDER;
-        }
-        if ("ollama".equals(name)) {
-            return orDefault(System.getProperty(LEGACY_OLLAMA_URL_KEY), OllamaProvider.DEFAULT_BASE_URL);
-        }
-        return requireDefaultBaseUrl(name);
+        return requireDefaultBaseUrl(orDefault(normalize(providerName), DEFAULT_PROVIDER));
     }
 
     private static String requireDefaultBaseUrl(String name) {
