@@ -30,6 +30,10 @@ dependencies {
 
 tasks.named('test') {
     useJUnitPlatform()
+    // Environment variables are part of the provider configuration contract, and there is no
+    // public API for mutating the current process environment. Tests that exercise the
+    // environment-variable lookup path need reflective access to java.lang.ProcessEnvironment.
+    jvmArgs '--add-opens', 'java.base/java.lang=ALL-UNNAMED'
 }
 
 application {

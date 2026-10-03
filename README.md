@@ -6,9 +6,10 @@ documents (`.txt`, `.docx`, `.pdf`) and **web articles**.
 
 ## Features
 
-- **Local LLM chat**: powered by Ollama (default model `qwen3.6:27b`), giving a
-  strong base level of conversational intelligence. Replies **stream** to the
-  page word-by-word as the model generates them, so responses feel instant.
+- **Local LLM chat**: powered by a provider-neutral client — Ollama by default
+  (model `qwen3.6:27b`), or FastFlowLM on an AMD NPU such as the Ryzen AI /
+  XDNA2 hardware in the Minisforum X1 Pro. Replies **stream** to the page
+  word-by-word as the model generates them, so responses feel instant.
 - **Read web articles**: paste any `http(s)` URL into the chat box and
   CompanionAI fetches the page, extracts the readable text, stores it in the
   knowledge base, and answers using it. Fetched pages are cached by URL and
@@ -28,8 +29,8 @@ documents (`.txt`, `.docx`, `.pdf`) and **web articles**.
   the knowledge base.
 - **Persistence**: uploaded documents and fetched articles live in `data/` and
   survive restarts — no re-training or degradation over time.
-- **Offline fallback**: if Ollama is unreachable, a small rule-based layer
-  (`ChatRules`) answers common greetings and small talk until the LLM is back.
+- **Offline fallback**: if the LLM runtime is unreachable, a small rule-based
+  layer (`ChatRules`) answers common greetings and small talk until it returns.
 - **Optional access token**: set `campanionai.authToken` and a lightweight
   sign-in page protects the app — suited to cloud hosting.
 - **Polished chat UI**: scrollable chat history, multi-line input (4 rows,
@@ -48,8 +49,14 @@ documents (`.txt`, `.docx`, `.pdf`) and **web articles**.
 
 - JDK 26
 - Gradle (the included wrapper `gradlew.bat` is used)
-- **Ollama** running locally (default at `http://localhost:11434`) with a model
-  pulled, e.g. `ollama pull qwen3.6:27b`
+- **A local LLM runtime.** Either:
+  - **Ollama** at `http://localhost:11434` with a model pulled
+    (`ollama pull qwen3.6:27b`), or
+  - **FastFlowLM** on an AMD NPU (XDNA2), e.g. the Ryzen AI 9 HX 370 in the
+    Minisforum X1 Pro, serving on `http://127.0.0.1:52625`.
+
+  The FastFlowLM path has been run against real NPU hardware — see
+  `docs/X1Pro-FastFlowLM-Validation.md`. Ollama is the development default.
 
 ## Build & Run
 
@@ -73,22 +80,39 @@ Then open [http://localhost:8080/](http://localhost:8080/) in your browser.
 4. Documents you drop directly into the `data/` folder are picked up on the next
    startup.
 
-## Switching models
+## Switching models and runtimes
 
-One script per installed model lives in `script/` (Git Bash):
+One launcher covers every runtime and model:
 
 ```bash
-# Switch the active model and start the app with it
-./script/run-gemma4-12b.sh          # -> gemma4:12b
-./script/run-deepseek-r1-32b.sh     # -> deepseek-r1:32b
+./script/run.sh ollama gemma4:12b            # Ollama, dev host
+./script/run.sh fastflowlm qwen2.5-it:3b     # FastFlowLM on an AMD NPU
 ```
 
-Each `run-*.sh` first calls `script/switch-model.sh <model>`, which verifies the
-model exists in Ollama (prints "Ollama is not running" or lists available models
-otherwise), records it in `script/current-model.txt`, and aborts on failure.
-On success the app is launched with that model via `campanionai.model`.
+`run.sh` resolves the provider's base URL, checks that the model is actually
+installed on the chosen runtime, builds the distribution on first run, warns if
+something is already listening on port 8080, and launches CompanionAI.
 
-To switch without launching, or for a model without a run script:
+The check matters more than it looks: FastFlowLM does not reject an unknown
+model tag — the request simply hangs. `run.sh` turns that silent hang into an
+immediate, actionable error.
+
+Two environment variables override the defaults:
+
+```bash
+COMPANIONAI_LLM_BASE_URL=http://127.0.0.1:52625 ./script/run.sh fastflowlm qwen2.5-it:3b
+COMPANIONAI_LLM_NUM_CTX=8192 ./script/run.sh ollama gemma4:12b
+```
+
+`COMPANIONAI_LLM_NUM_CTX` is Ollama-only. FastFlowLM fixes the context length
+when the runtime starts, so on that provider the value warns and is ignored.
+
+### Older per-model scripts
+
+The nine `script/run-<model>.sh` wrappers still work and still target Ollama.
+They predate the provider abstraction; prefer `run.sh` for anything new.
+
+To switch without launching:
 
 ```bash
 ./script/switch-model.sh qwen2.5:14b
@@ -113,9 +137,12 @@ order system property → environment variable → default.
 | `companionai.llm.numCtx`    | `LLM_NUM_CTX`     | *(unset)*        | Context window. Ollama only; ignored with a warning elsewhere      |
 | `companionai.llm.think`     | `LLM_THINK`       | `false`          | `fastflowlm` only; enables reasoning output                        |
 
-> The default FastFlowLM base URL comes from vendor documentation and is
-> **not yet validated against real hardware**. Set `LLM_BASE_URL` explicitly
-> until it is confirmed — see `docs/X1Pro-FastFlowLM-Validation.md`.
+> The default FastFlowLM base URL (`http://127.0.0.1:52625`) is the port
+> `flm port` reports, and it has been confirmed working against FastFlowLM
+> `1.0.7` on the X1 Pro. CompanionAI still warns if you rely on it without
+> setting `LLM_BASE_URL`, because the value comes from vendor documentation
+> rather than from configuration you set — see
+> `docs/X1Pro-FastFlowLM-Validation.md` §0.2.
 
 The legacy keys below still work unchanged for Ollama.
 
@@ -155,6 +182,10 @@ Examples:
 ```bash
 # different model
 ./gradlew run -Dcampanionai.model=deepseek-r1:latest
+# FastFlowLM on an AMD NPU
+./gradlew run -Dcompanionai.llm.provider=fastflowlm \
+  -Dcompanionai.llm.model=qwen2.5-it:3b \
+  -Dcompanionai.llm.baseUrl=http://127.0.0.1:52625
 # cloud deployment with a public address + access token
 ./gradlew run -Dcampanionai.host=0.0.0.0 -Dcampanionai.authToken=change-me \
   -Dcampanionai.allowPrivateFetch=false
@@ -163,16 +194,24 @@ Examples:
   -Dcampanionai.live.defaultLocation="Uxbridge, UK"
 ```
 
-## Cloud hosting
+## Cloud and public hosting
 
-CompanionAI binds `0.0.0.0` by default and is designed to run on a single GPU
-cloud box alongside Ollama. Recommended settings for a public instance:
+CompanionAI binds `0.0.0.0` by default and is designed to run on a single host
+alongside its LLM runtime. Recommended settings for a public instance:
 
-- Set `campanionai.authToken` so a sign-in page protects the app.
+- Set `campanionai.authToken` so a sign-in page protects the app. **This is the
+  control that matters** — the app itself is the only thing in the chain that
+  needs protecting.
 - Keep `campanionai.allowPrivateFetch=false` so the app can't be used to probe
   internal network addresses (SSRF).
 - Point `campanionai.dataDir` at persistent storage (e.g. a mounted volume).
-- Run Ollama on the same host; set `campanionai.ollamaUrl` if it differs.
+- Keep the LLM runtime on loopback and do not publish its API.
+
+On the X1 Pro, FastFlowLM's `flm serve` defaults to binding `127.0.0.1` and was
+confirmed unreachable from both the LAN and the public Internet, so no extra
+network control is needed for it — that was verified, not assumed. CompanionAI's
+own `0.0.0.0:8080` binding is what you must front with a reverse proxy or
+restrict at the firewall. See `docs/X1Pro-Home-Hosting-Architecture.md`.
 
 ## Project layout
 
@@ -217,9 +256,12 @@ and stops the embedded Tomcat gracefully.
 
 ## Notes
 
-- The intelligence comes from a local LLM via Ollama, not from code. The Java
-  side is a thin HTTP client plus a document loader — swapping the model is a
-  one-line config change (`campanionai.model`).
+- The intelligence comes from a local LLM, not from code. The Java side is a
+  thin HTTP client plus a document loader; swapping the model or the runtime is
+  a one-line config change (`companionai.llm.model` / `companionai.llm.provider`).
+  Both supported runtimes speak the OpenAI chat-completions shape, so one
+  transport serves both and vendor-specific request fields stay confined to their
+  provider class.
 - The browser UI is a single-page app: chat uses streaming `fetch` over
   Server-Sent Events (`/api/chat/stream`), so tokens render as they arrive and
   the chat history persists without a full reload. Audio tones are generated

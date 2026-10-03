@@ -1,19 +1,19 @@
 # X1 Pro + FastFlowLM Phase 0 Validation Runbook
 
-> ## ⚠ No row in this document is `[VALIDATED]`
+> ## ⚠ Parts of this document are still a plan, not a result
 >
-> **Previous drafts incorrectly marked hardware validation as pending in the abstract;** a concrete run was
-> performed on **2026-10-03** and recorded in §0.1. The blanket warning above remains the general policy
-> of this runbook until all Blocks 1–8 are completed. Nothing here should be treated as runtime/model-
-> execution `[VALIDATED]`. The structure below is the plan; §0.1 is the first measurement.
-> a placeholder or a vendor claim. This document is a procedure to be executed, not a description of
-> a system that exists. Do not cite it as deployment guidance, and do not treat any port, model tag,
-> benchmark figure or security conclusion in it as established.
+> **Blocks 1–6 were measured on 2026-10-03 and are recorded in §0.1–§0.2. Blocks 7–8 have not run.**
+> Everything below §0.2 remains the original procedure and carries `[TBD]` markers where it is still
+> unexecuted. Do not cite this document as production-deployment guidance: the app-to-model chat path
+> has not been exercised, no performance benchmark has been run, and FastFlowLM's listener
+> authentication behaviour is unrecorded. Where a value is `[TBD]`, it is unknown — not zero, not
+> safe, not fine.
 
 ## How to use this document
 
-**Nothing in this document asserts a result.** Every row is either a command to run or a question
-that has not yet been answered.
+**Nothing below §0.2 asserts a result.** Every row there is either a command to run or a question that
+has not yet been answered. §0.1 and §0.2 are the exception: they record measurements from the
+2026-10-03 run.
 
 Status markers match `LLM-Provider-Architecture.md`:
 
@@ -21,12 +21,12 @@ Status markers match `LLM-Provider-Architecture.md`:
 |---|---|
 | `[IMPLEMENTED]` | Written in this repository, compiling, covered by tests. Not confirmed on hardware |
 | `[VENDOR]` | Stated by upstream vendor documentation. A claim to be tested, not a measurement |
-| `[VALIDATED]` | Confirmed on hardware. **No row currently holds this marker.** |
+| `[VALIDATED]` | Confirmed on hardware. Held by Blocks 1, 3, 4, 5 and 6 — see §0.1–§0.2 |
+| `[OBSERVED]` | Seen in a run, but not a criterion this runbook requires. Recorded so it is not mistaken for either a pass or a fault |
 | `[TBD]` | Unknown. Determined by the commands in this document |
 
-No version, port, model name, benchmark number, API capability or XDNA configuration is assumed
-anywhere in this document. Where a value is needed, the document tells you how to discover it rather
-than what it is.
+Above §0.2, no version, port, model name, benchmark number, API capability or XDNA configuration is
+assumed. Where a value is needed, the document tells you how to discover it rather than what it is.
 
 ### What this document does and does not gate
 
@@ -36,8 +36,9 @@ documented relaxation: the abstraction is runtime-neutral and its correctness is
 `OpenAiCompatTransportTest` against a stub, not by this hardware.
 
 This document still gates everything that would become a **claim about the X1 Pro**: performance
-figures, the chosen model, the port, firewall and systemd configuration, and any statement that
-the deployment is production-ready. See `LLM-Provider-Architecture.md` §6.1.
+figures, model selection, firewall and systemd configuration, and any statement that the deployment is
+production-ready. Hardware presence, the FastFlowLM request contract, and loopback-only binding are
+settled and are no longer gated. See `LLM-Provider-Architecture.md` §6.1.
 
 ---
 
@@ -57,6 +58,11 @@ because their commands must embed the port and model tag this run discovers rath
 
 ## 0.1 Part A results — 2026-10-03
 
+> **Read this as a point-in-time snapshot, not the current state of the machine.** Part A ran before
+> FastFlowLM was installed and before the memlock limit was fixed, so its "not installed" and
+> "blocker" findings are historical. §0.2 records what was true afterwards. Where the two disagree,
+> **§0.2 is correct.**
+
 `[VALIDATED]` Block 1 passed in full. **The NPU is present and the kernel driver is loaded and
 correct.** Block 2 did not "fail" — it established that **no FastFlowLM software is installed at
 all**, so Blocks 3–8 cannot run yet. That is a provisioning gap, not a hardware fault.
@@ -68,20 +74,24 @@ all**, so Blocks 3–8 cannot run yet. That is a provisioning gap, not a hardwar
 | NPU on PCI bus | `c6:00.1 Signal processing controller: Advanced Micro Devices, Inc. [AMD] Strix/Krackan/Strix Halo Neural Processing Unit (rev 10)` | `[VALIDATED]` criterion 1 |
 | Device node | `crw-rw----+ 1 root render 261, 0 Oct 2 07:22 accel0` in `/dev/accel/` | `[VALIDATED]` criterion 2 |
 | Module loaded | `amdxdna 172032 0`, with `amd_pmf 131072 1 amdxdna` and `gpu_sched 69632 2 amdxdna,amdgpu` | `[VALIDATED]` criterion 3 |
-| Driver origin | `/lib/modules/7.0.0-34-generic/kernel/drivers/accel/amdxdna/amdxdna.ko.zst` | **in-tree, not DKMS** |
+| Driver origin | `/lib/modules/7.0.0-34-generic/kernel/drivers/accel/amdxdna/amdxdna.ko.zst` | in-tree **at the time of this run** — see §0.2, this later changed |
 | `srcversion` | `4612EC552523E4C8FB4B5E5` | recorded verbatim |
 | `vermagic` | `7.0.0-34-generic SMP preempt mod_unload modversions` | recorded verbatim |
-| `dkms status` | *no output* — DKMS is **not installed** | consistent with in-tree driver |
+| `dkms status` | *no output* — DKMS was **not installed at this point** | consistent with in-tree driver; `amdxdna-dkms` was installed later, see §0.2 |
 | Kernel | `7.0.0-34-generic` | `[VENDOR]` ≥ 7.0 ships `amdxdna` in-tree |
 | OS | `Ubuntu 26.04.1 LTS (Resolute Raccoon)` | **newer than any supported release** |
 | CPU threads | `24` | |
 | RAM | `Mem: 59Gi total, 2.3Gi used, 53Gi free, 4.4Gi buff/cache, 57Gi available`, `Swap: 8.0Gi` | usable total is 59 GiB, not the 64 GB the design assumed |
-| `ulimit -l` | **`8192`** (8 MiB) | ⚠ **BLOCKER — see below** |
+| `ulimit -l` | **`8192`** (8 MiB) | ⚠ **BLOCKER — resolved in §0.2** |
 
 **The in-tree driver is the desired outcome.** `[VENDOR]` FastFlowLM requires the `amdxdna` driver,
 "included in kernel 7.0+, or via amdxdna-dkms". At kernel 7.0.0-34 the in-tree module already
-satisfies that requirement. **Do not install `amdxdna-dkms`** — on this kernel it would shadow a
-working in-tree module and add a rebuild-on-every-kernel-update failure mode for no benefit.
+satisfies that requirement.
+
+> **Superseded.** This section originally advised **not** installing `amdxdna-dkms`. `amdxdna-dkms`
+> was then installed as part of FastFlowLM's own prerequisite list. Nothing broke, and the loaded
+> module is still the in-tree one — but the advice was wrong about what would happen, so it should not
+> be quoted. §0.2 records the driver origin accurately.
 
 ### ⚠ Blocker 1 — memlock limit is 8 MiB, must be unlimited
 
@@ -103,9 +113,9 @@ sudo reboot
 ```
 
 Verify afterwards with `ulimit -l` in a **new login session** — `limits.conf` does not affect
-already-running shells.
+already-running shells. `[VALIDATED]` Done; see §0.2.
 
-### ⚠ Blocker 2 — no FastFlowLM, no XRT stack
+### ⚠ Blocker 2 — no FastFlowLM, no XRT stack — `[VALIDATED]` resolved in §0.2
 
 | Component | Probe | Result |
 |---|---|---|
@@ -145,6 +155,121 @@ dpkg -l | grep linux-firmware
 ```
 
 `docs/x1-validate-part-a.sh` has been corrected to check both paths.
+
+---
+
+## 0.2 Part B results — 2026-10-03
+
+Provisioning and Block 5 probes were run on the same machine the day after Part A. **Blocks 1–5 now
+hold measured results.** Blocks 6–8 (hardening, dev-host mirror, RAM baseline) have not run, so the
+deployment is still not production-ready.
+
+### Resolved: Block 2 — the stack is installed
+
+| Component | Observed |
+|---|---|
+| `flm` | `1.0.7` |
+| XRT NPU runtime | `libxrt-npu2 1:2.25.0-4~resolute1`, `libxrt-utils`, `libxrt2` |
+| Firmware | `/lib/firmware/amdnpu/1502_00`, `17f0_10`, `17f0_11`; `linux-firmware 20260319.git217ca6e4.1ubuntu` |
+| NPU firmware reported by `flm validate` | `1.1.2.64` — meets the ≥ 1.1.0.0 prerequisite |
+| `amdxdna-dkms` | `7.0.0-rc1+git20260310.6b13cb8f4-resolute1` |
+| Device | `/dev/accel/accel0`, 8 columns |
+
+### Resolved: Block 1 — driver origin needs restating
+
+Part A recorded the in-tree module as the desired outcome and advised **against** installing
+`amdxdna-dkms`. `amdxdna-dkms` was subsequently installed as part of the documented FastFlowLM
+prerequisite list, so the earlier advice no longer matches the machine.
+
+`modinfo -F filename amdxdna` still reports the in-tree path
+`/lib/modules/7.0.0-34-generic/kernel/drivers/accel/amdxdna/amdxdna.ko.zst`, and `flm validate`
+reports driver version `0.7` — **the working module is the in-tree one, and that is what Part 5 was
+executed on.** The DKMS package being present is no longer evidence of an active DKMS-built module,
+and neither Part A's "DKMS is not installed" nor its "in-tree, not DKMS" verdict should be quoted on
+its own. `[OBSERVED]`: package present, loaded module in-tree.
+
+### Resolved: Blocker 1 — memlock
+
+`ulimit -l` is now `unlimited` in a new login session, and `flm validate` reports
+`"memlock": "infinity"`, `"memlock_ok": true`. The 8 MiB blocker from Part A is closed.
+
+### Block 3 — the two decisive checks: `[VALIDATED]` PASS
+
+| Check | Observed |
+|---|---|
+| `flm validate` | exits 0: kernel OK, `/dev/accel/accel0` found with 8 columns, firmware `1.1.2.64`, driver `0.7`, enough columns, memlock OK |
+| `flm validate --json` | `"ready": true`, `"all_fw_ok": true`, `"amd_device_found": true`, `"enough_cols": true` |
+| `xrt-smi examine` | `XRT 2.25.00`; NPU firmware `1.1.2.64`; `[0000:c6:00.1] RyzenAI-npu4 aie2p 6x8` |
+
+Both paths agree independently, which is what Block 3 exists to establish: the DRM path
+(`flm validate`) and the XRT path (`xrt-smi`) each see the same device.
+
+### Block 4 — model execution: `[VALIDATED]` PASS
+
+- `flm port` → `52625`, matching the documented default. `FastFlowLmProvider.DEFAULT_BASE_URL` is therefore correct.
+- Catalogue pulled; **`qwen2.5-it:3b` is the only installed model.** Every other entry in the catalogue is remote (`⏬`).
+- `flm cache list` is unsupported in `1.0.7` and exits `1`. `flm list --filter installed` is the equivalent. `docs/x1-validate-part-a.sh` treats the unsupported exit as expected rather than a failure.
+- Server started as `flm serve qwen2.5-it:3b --host 127.0.0.1 --port 52625`.
+
+### Block 5 — OpenAI-compatibility probes
+
+| Probe | Result | Evidence |
+|---|---|---|
+| F1 non-streaming | `[VALIDATED]` PASS | object body, `chat.completion` object, model echoed, `choices[0].message.content` = `Ok.`, `finish_reason` = `stop`, usage present |
+| F2 streaming | `[VALIDATED]` PASS | `data:` frames with `choices[0].delta.content`, deltas `1 2 3 4 5`, final frame `finish_reason` = `stop` with runtime telemetry, terminated by `data: [DONE]` |
+| F4 model discovery | `[VALIDATED]` PASS | `GET /v1/models` returned an OpenAI-compatible `{"data":[...]}` list |
+| F5 `think` flag | `[VALIDATED]` PASS | request with `"think": true` returned a normal completion; response shape unchanged |
+| F3 unknown model | `[OBSERVED]` **does not meet the requirement** | the request **hung** until the client timed out (`--max-time 5` → `HTTP 000`), with no status code and no error body |
+
+**F3 is a real gap and must not be recorded as passing.** R7/R8 require a non-2xx status *and* a
+parseable error body without hanging. CompanionAI's transport survives this — the client-side timeout
+surfaces as an `LlmException` — but an operator who mistypes a model tag gets a hung request rather
+than an error message. Treat model-tag correctness as an operational dependency, not as runtime
+validation.
+
+### Block 6 — exposure: `[VALIDATED]` PASS with default settings
+
+`flm serve` defaults are `host 127.0.0.1`, `cors 1` (enabled), `port` from `flm port`.
+
+| Question | Observed value |
+|---|---|
+| Bind address | `127.0.0.1` |
+| Reachable from the same host | yes |
+| Reachable from a second LAN machine (`192.168.0.82`) | no |
+| Reachable from the public Internet (`94.2.13.93`, `x1pro.runningcode.dev`) | no |
+| CORS allowed by default | `[TBD]` — `--cors 1` is the documented default, not yet probed with a live `OPTIONS` request |
+| Authentication accepted or rejected | `[OBSERVED]` none enforced on the `/v1` surface; loopback binding is the only control |
+
+**This closes the decision that Block 6 was gating:** the listener binds to loopback by default and
+is not reachable from the LAN or the Internet, so FastFlowLM's `/v1/` surface needs no additional
+network control. CompanionAI is the component that must be protected, and it defaults to
+`0.0.0.0:8080`.
+
+### End-to-end: `[OBSERVED]` app boots, chat path not yet exercised
+
+```bash
+./gradlew run \
+  -Dcompanionai.llm.provider=fastflowlm \
+  -Dcompanionai.llm.model=qwen2.5-it:3b \
+  -Dcompanionai.llm.baseUrl=http://127.0.0.1:52625
+```
+
+CompanionAI started cleanly against FastFlowLM, Tomcat reported healthy, `GET /` returned the UI
+HTML and `GET /api/stats` returned valid JSON. **No `/api/chat` or `/api/chat/stream` request has been
+made through CompanionAI**, so the application-to-model path is untested end to end even though F1/F2
+pass against the runtime directly.
+
+### Risk: Ubuntu 26.04 remains unsupported by the vendor
+
+Unchanged from Part A. FastFlowLM's guide lists 24.04 LTS, 25.10, Arch, and generic Linux; this host
+is 26.04. Blocks 3–5 all passed, so the risk did not materialise, but it is not retired.
+
+### Performance: `[TBD]`
+
+F2's final frame carried runtime telemetry for one tiny completion (`prefill` ≈ 42 tok/s,
+`decoding` ≈ 25 tok/s, 49 active KV tokens). That is a single non-representative sample, not a
+benchmark. No model-selection or latency claim can be made from it. See
+`Qwen-Model-Evaluation.md`.
 
 ---
 
@@ -337,9 +462,9 @@ curl -s -w '\nHTTP %{http_code}\n' "$BASE/chat/completions" \
 | F4 | R10 | `GET /v1/models` returns a list; confirm the served model tag matches what `flm run` accepted |
 | F5 | Q6 | `"think"` field accepted; determine whether reasoning text appears in the response and where |
 
-`[TBD]` F2 is the highest-risk probe. `[IMPLEMENTED]` CompanionAI's shared transport accepts both SSE
-`data:` frames and bare JSON lines, so either result is handled without a code change — but the
-result still determines which framing is actually in use and must be recorded.
+`[VALIDATED]` F2 was the highest-risk probe and it passed with standard `data:` framing. `[IMPLEMENTED]`
+CompanAI's shared transport accepts both `data:` frames and bare JSON lines, so the tolerant parser
+stays as-is.
 
 ### 6.2 Exposure checks — run with defaults
 
@@ -360,15 +485,15 @@ curl -s -m 5 -w '\nHTTP %{http_code}\n' "http://<X1PRO_LAN_IP>:<FLM_PORT>/v1/mod
 
 ## 6.3 Record the bind behaviour
 
-`[TBD]` Fill this in once Block 6.2 has run. **This table drives the deployment security design.**
+`[VALIDATED]` Filled in from the 2026-10-03 run; see §0.2 for the evidence.
 
 | Question | Observed value |
 |---|---|
-| Bind address: `127.0.0.1` or `0.0.0.0` / `::` | `[TBD]` |
-| Reachable from a second LAN machine | `[TBD]` |
-| Reachable from the public Internet | `[TBD]` |
-| CORS allowed by default | `[TBD]` |
-| Authentication accepted or rejected | `[TBD]` |
+| Bind address: `127.0.0.1` or `0.0.0.0` / `::` | `127.0.0.1` |
+| Reachable from a second LAN machine | no |
+| Reachable from the public Internet | no |
+| CORS allowed by default | `[TBD]` — `flm serve --help` documents `--cors` defaulting to `1`, not yet probed live |
+| Authentication accepted or rejected | `[OBSERVED]` none enforced; loopback binding is the only control |
 
 ---
 
@@ -591,9 +716,8 @@ Top RSS processes:          <verbatim>
 
 # 12. Phase 0 exit criteria
 
-Phase 0 is complete only when **all** of the following are `[VALIDATED]`. Until then, **nothing about
-the X1 Pro may be asserted, deployed or benchmarked** — no port, no model, no performance figure, no
-security configuration.
+Phase 0 is complete only when **all** of the following are `[VALIDATED]`. Until then, **no
+performance figure, model selection or deployment security configuration may be asserted.**
 
 This no longer blocks writing the provider abstraction, which was permitted to proceed under the
 Gate A / Gate B split described in `LLM-Provider-Architecture.md` §6.1. It continues to block every
@@ -601,16 +725,19 @@ claim in the table below.
 
 | # | Criterion | Block |
 |---:|---|---|
-| 1 | XDNA2 NPU visible on the PCI bus | 1 |
-| 2 | `/dev/accel` device node present | 1 |
-| 3 | `amdxdna` module loaded and version recorded | 1, 2 |
-| 4 | `flm validate` succeeds | 3 |
-| 5 | `xrt-smi examine` lists the NPU | 3 |
-| 6 | A supported Qwen model loads and generates **on the NPU** | 4 |
-| 7 | FastFlowLM OpenAI-compatible API reachable over loopback | 5 |
-| 8 | R1–R10 verified or explicitly waived with evidence | 5, 7 |
-| 9 | Actual bind address and CORS default documented | 5, 6 |
-| 10 | RAM baseline recorded | 8 |
-| 11 | Final security configuration selected and recorded | 10 |
+| 1 | XDNA2 NPU visible on the PCI bus | 1 | ✅ |
+| 2 | `/dev/accel` device node present | 1 | ✅ |
+| 3 | `amdxdna` module loaded and version recorded | 1, 2 | ✅ in-tree, `0.7` |
+| 4 | `flm validate` succeeds | 3 | ✅ |
+| 5 | `xrt-smi examine` lists the NPU | 3 | ✅ `RyzenAI-npu4` |
+| 6 | A supported Qwen model loads and generates **on the NPU** | 4 | ✅ `qwen2.5-it:3b` |
+| 7 | FastFlowLM OpenAI-compatible API reachable over loopback | 5 | ✅ port `52625` |
+| 8 | R1–R10 verified or explicitly waived with evidence | 5, 7 | ⚠ **R7/R8 not met** — unknown-model request hangs; waived with evidence in §0.2 |
+| 9 | Actual bind address and CORS default documented | 5, 6 | ⚠ bind `127.0.0.1` ✅; CORS default still `[TBD]` |
+| 10 | RAM baseline recorded | 8 | ⬜ Block 8 not run |
+| 11 | Final security configuration selected and recorded | 10 | ⬜ Block 10 not run |
+
+Criteria 1–7 and 9's bind address are settled. **Phase 0 is not complete**: criterion 8 is waived
+rather than met, and 10–11 are outstanding.
 
 If any criterion fails, the outcome is documented and the production runtime decision is revisited. A failed criterion is a valid and useful Phase 0 result; it is not a reason to proceed regardless.

@@ -7,13 +7,17 @@ Status legend used throughout this document:
 | `[CURRENT]` | Pre-existing behaviour, read directly from this repository's source before the provider refactor |
 | `[IMPLEMENTED]` | Written in this repository, compiling, and covered by tests. **Not** confirmed against real hardware |
 | `[PLANNED]` | Design decision taken, not yet implemented |
-| `[VALIDATED]` | Verified by measurement on hardware. **Nothing in this document holds this marker yet.** |
+| `[VALIDATED]` | Verified by measurement on hardware. Held by the FastFlowLM request contract and loopback binding (see §3.1) |
+| `[OBSERVED]` | Seen in a run, but not a criterion that runbook requires — recorded so it is not mistaken for a pass |
 | `[TBD]` | Unknown. Must be determined by running the probes in this document or `X1Pro-FastFlowLM-Validation.md` |
 | `[VENDOR]` | Stated by upstream vendor documentation. Trusted as a claim, not as a measurement |
 
 `[IMPLEMENTED]` and `[VALIDATED]` are deliberately distinct. An `[IMPLEMENTED]` row is backed by the
 build and the test suite; an `[VALIDATED]` row is backed by a measurement on the target hardware.
-Nothing in the `llm/` package has reached `[VALIDATED]`.
+
+`FastFlowLmProvider` has reached `[VALIDATED]` for the FastFlowLM path: the request contract in §3.1
+was confirmed against FastFlowLM `1.0.7` on the X1 Pro. The FastFlowLM half of the deployment and
+performance gate is still open (§6.1), and `OllamaProvider` remains `[IMPLEMENTED]` only.
 
 ---
 
@@ -154,24 +158,29 @@ prove the client emits and accepts the shape; they do **not** prove any runtime 
 
 | # | Feature | Wire-shape tests | Hardware status |
 |---:|---|---|---|
-| R1 | `POST /v1/chat/completions` | `[IMPLEMENTED]` posts to this path | `[TBD]` probe A1 / F1 |
-| R2 | `messages[].role` ∈ `system`,`user`,`assistant` | `[IMPLEMENTED]` | `[TBD]` A1 / F1 |
-| R3 | Top-level `temperature` | `[IMPLEMENTED]` | `[TBD]` A1 / F1 |
-| R4 | Non-stream reply at **`choices[0].message.content`** | `[IMPLEMENTED]` | `[TBD]` A1 / F1 |
-| R5 | `stream:true` → **SSE** `data: {…}` frames terminated by `data: [DONE]` | `[IMPLEMENTED]` SSE **and** bare-JSON-lines tolerated | `[TBD]` A2 / F2 |
-| R6 | Stream delta at **`choices[0].delta.content`** | `[IMPLEMENTED]` | `[TBD]` A2 / F2 |
-| R7 | Non-2xx → error body → `LlmException` → `ChatRules` offline fallback | `[IMPLEMENTED]`; call sites `ModelServlet.java` | `[TBD]` A3 / F3 |
-| R8 | Unknown model → error, never a crash | `[IMPLEMENTED]` | `[TBD]` A3 / F3 |
-| R9 | `finish_reason` present | not read by the transport | `[TBD]` A1 / F1 |
-| R10 | Model identity readable at runtime | `[IMPLEMENTED]` via `LlmProvider.model()` | `[TBD]` A4 / F4 |
+| R1 | `POST /v1/chat/completions` | `[IMPLEMENTED]` posts to this path | `[VALIDATED]` F1 |
+| R2 | `messages[].role` ∈ `system`,`user`,`assistant` | `[IMPLEMENTED]` | `[VALIDATED]` F1 |
+| R3 | Top-level `temperature` | `[IMPLEMENTED]` | `[VALIDATED]` F1 |
+| R4 | Non-stream reply at **`choices[0].message.content`** | `[IMPLEMENTED]` | `[VALIDATED]` F1 |
+| R5 | `stream:true` → **SSE** `data: {…}` frames terminated by `data: [DONE]` | `[IMPLEMENTED]` SSE **and** bare-JSON-lines tolerated | `[VALIDATED]` F2 — SSE framing |
+| R6 | Stream delta at **`choices[0].delta.content`** | `[IMPLEMENTED]` | `[VALIDATED]` F2 |
+| R7 | Non-2xx → error body → `LlmException` → `ChatRules` offline fallback | `[IMPLEMENTED]`; call sites `ModelServlet.java` | `[OBSERVED]` F3 — see below |
+| R8 | Unknown model → error, never a crash | `[IMPLEMENTED]` | `[OBSERVED]` F3 — **does not hold** |
+| R9 | `finish_reason` present | not read by the transport | `[VALIDATED]` F1/F2 |
+| R10 | Model identity readable at runtime | `[IMPLEMENTED]` via `LlmProvider.model()` | `[VALIDATED]` F4 |
 
-`[VENDOR]` Ollama and FastFlowLM both document an OpenAI-compatible `/v1` surface. Nothing in that
-claim has been verified on either machine — hence every row's hardware status is `[TBD]`.
+`[VALIDATED]` against FastFlowLM `1.0.7` on the Minisforum X1 Pro, 2026-10-03. Evidence in
+`X1Pro-FastFlowLM-Validation.md` §0.2. The **Ollama** half of these rows is still `[TBD]`: no Ollama
+`/v1` probe has been run.
 
-R5 is the one requirement where the tolerant parser is doing real work rather than being
-defensive: Ollama's native endpoint emits NDJSON, and it is not yet established that Ollama's
-`/v1` surface uses SSE either. The transport accepts both framings so that a negative probe result
-does not require a code change.
+**R7 and R8 do not hold on FastFlowLM.** An unknown model tag makes the request hang until the client
+times out — no status code, no error body. `[IMPLEMENTED]` the client survives this: the timeout
+becomes an `LlmException` and `ChatRules` takes over. But the requirement as written is not met, so
+these rows are `[OBSERVED]`, not `[VALIDATED]`. Model-tag correctness is an operational dependency.
+
+R5 is worth keeping tolerant: FastFlowLM emits proper SSE, but Ollama's native endpoint emits NDJSON
+and Ollama's `/v1` surface is still unprobed. The transport accepts both framings so that a future
+negative Ollama probe result does not require a code change.
 
 ## 3.2 Confirmed NOT required
 
@@ -190,8 +199,14 @@ does not require a code change.
 
 | Feature | Scope | Status |
 |---|---|---|
-| `options.num_ctx` — per-request context length | `[VENDOR]` Ollama native only. `[VENDOR]` FastFlowLM sets context at `flm serve` time via `--ctx-len` and has no per-request equivalent | `[TBD]` verify probe A5; no F equivalent |
-| `"think"` request flag | `[VENDOR]` FastFlowLM server mode only, non-standard; CLI uses `/think`. Not an OpenAI field | `[TBD]` verify probe F5; not applicable to Ollama |
+| `options.num_ctx` — per-request context length | `[VENDOR]` Ollama native only. `[VENDOR]` FastFlowLM sets context at `flm serve` time via `--ctx-len` and has no per-request equivalent | `[IMPLEMENTED]` never sent by `FastFlowLmProvider`; `PER_REQUEST_CONTEXT_LENGTH` absent, so setting `LLM_NUM_CTX` warns and is ignored |
+| `"think"` request flag | `[VENDOR]` FastFlowLM server mode only, non-standard; CLI uses `/think`. Not an OpenAI field | `[VALIDATED]` F5 — accepted by FastFlowLM `1.0.7`, response shape unchanged. Always sent explicitly; see note |
+
+> **`think` is always sent, even when false.** `[VALIDATED]` F5 only established that the field is
+> *accepted* when true. Whether FastFlowLM `1.0.7` also accepts `"think": false`, or rejects unknown
+> fields, was not probed. Sending it explicitly is the conservative choice: it makes the request
+> deterministic instead of depending on the server's default. `FastFlowLmProviderTest` pins both
+> cases so the behaviour cannot change silently.
 
 ## 3.4 `[PLANNED]` Capability contract
 
@@ -311,23 +326,24 @@ separately in `ModelServlet` would have let the displayed values drift from what
 
 ---
 
-# 5. `[TBD]` Open questions about FastFlowLM
+# 5. Open questions about FastFlowLM
 
-Every item in this section is unresolved. None may be assumed.
+Answered on 2026-10-03 against FastFlowLM `1.0.7` on the X1 Pro unless marked `[TBD]`. Evidence:
+`X1Pro-FastFlowLM-Validation.md` §0.2.
 
-| # | Question | How to resolve |
+| # | Question | Answer |
 |---:|---|---|
-| Q1 | Which FastFlowLM release is installed on the X1 Pro? | `flm --version`, `dpkg -l \| grep -Ei 'fastflowlm\|xrt\|amdxdna'` |
-| Q2 | Which NPU firmware, driver and kernel are present? | `flm validate`, `xrt-smi examine`, `uname -a`, `modinfo -F filename amdxdna` |
-| Q3 | Is the API truly OpenAI-compatible, and on which subset? | Probes F1–F5 in `X1Pro-FastFlowLM-Validation.md` |
-| Q4 | Does streaming use SSE with `data:` frames and a `data: [DONE]` terminator? | Probe F2 |
-| Q5 | What is the error body shape and HTTP status for an unknown model? | Probe F3 |
-| Q6 | Does the `"think"` field exist and where does reasoning text appear in the response? | Probe F5 |
-| Q7 | Is `qwen3.6-moe:35b-a3b` present in the installed release's catalogue? | `flm pull qwen3.6-moe:35b-a3b` |
-| Q8 | **What address does `flm serve` bind to — `127.0.0.1` or `0.0.0.0`?** | `ss -ltnp \| grep <port>` |
-| Q9 | Is CORS enabled by default in the installed release? | `OPTIONS` preflight probe, Block 5 |
-| Q10 | Is server mode stateless, and what is the measured prefill penalty? | Block 4 banner plus `llmBench` in Phase 4 |
-| Q11 | What is the request queue / socket concurrency ceiling? | `[VENDOR]` `--q-len` and `--socket`; confirm empirically |
+| Q1 | Which FastFlowLM release is installed? | `1.0.7` |
+| Q2 | Which NPU firmware, driver and kernel are present? | Kernel `7.0.0-34-generic`, in-tree `amdxdna` reporting `0.7`, firmware `1.1.2.64` at `/lib/firmware/amdnpu/17f0_10` |
+| Q3 | Is the API truly OpenAI-compatible, and on which subset? | `[VALIDATED]` F1, F2, F4, F5 pass. F3 fails: unknown models hang rather than returning an error |
+| Q4 | Does streaming use SSE with `data:` frames and a `data: [DONE]` terminator? | `[VALIDATED]` Yes, both confirmed |
+| Q5 | What is the error body shape and HTTP status for an unknown model? | `[OBSERVED]` **Neither exists** — the request hangs until the client times out |
+| Q6 | Does the `"think"` field exist, and where does reasoning text appear? | `[VALIDATED]` Accepted; response shape unchanged. Reasoning-text location not inspected |
+| Q7 | Is `qwen3.6-moe:35b-a3b` in the catalogue? | `[OBSERVED]` Present but remote (`⏬`), not pulled. Only `qwen2.5-it:3b` is installed |
+| Q8 | **What address does `flm serve` bind to?** | `[VALIDATED]` `127.0.0.1`. Unreachable from LAN and Internet |
+| Q9 | Is CORS enabled by default in the installed release? | `[TBD]` `--cors` documents `1`, but no live `OPTIONS` probe has been run |
+| Q10 | Is server mode stateless, and what is the measured prefill penalty? | `[TBD]` Block 4 banner plus `llmBench` in Phase 4 |
+| Q11 | What is the request queue / socket concurrency ceiling? | `[TBD]` `[VENDOR]` `--q-len` and `--socket`; confirm empirically |
 | Q12 | What is the production context budget at 4k / 8k / 16k? | `Qwen-Model-Evaluation.md` |
 
 `[VENDOR]` FastFlowLM documentation states that the API has **no authentication** — a placeholder key is accepted. This makes Q8 a security question, not a preference. See `X1Pro-Home-Hosting-Architecture.md` §22.
@@ -345,7 +361,7 @@ completed**, because a single gate conflated two questions that have different a
 | | Gate A — implementation | Gate B — deployment and performance |
 |---|---|---|
 | Question | May the application be restructured around a provider-neutral boundary? | May anything be asserted or deployed about the X1 Pro? |
-| Answer | **Yes.** Satisfied. | **No.** Still closed. |
+| Answer | **Yes.** Satisfied. | **Partly.** Hardware, request contract and bind address are now `[VALIDATED]`; benchmarks, firewall/systemd and model selection are not. |
 | Depends on hardware | No | Yes |
 | Covers | Phases 1–3: `llm/` package, configuration, consumer rewiring | Phase 4 benchmarks, Phase 5 scripts, firewall/systemd, model selection |
 | Rationale | The abstraction is runtime-neutral. Every vendor-specific field is confined to one provider class and asserted against a stub. No assumption about the target host enters application code, and the whole change is reversible. | Anything here becomes a claim about hardware, or a security control that depends on an observed bind address. Neither can be justified without measurement. |
@@ -363,32 +379,45 @@ shown to execute a model. That risk does not apply to a provider abstraction:
 
 ### What Gate B still forbids
 
-Until `X1Pro-FastFlowLM-Validation.md` §12 is satisfied, none of the following may be written as
-fact, shipped as a default, or marked `[VALIDATED]`:
+Blocks 1–6 were measured on 2026-10-03, so the port and bind address are no longer in this list.
+Until `X1Pro-FastFlowLM-Validation.md` §12 is fully satisfied, the following may still not be written
+as fact, shipped as a default, or marked `[VALIDATED]`:
 
-- Any FastFlowLM port, bind address, or CORS default
+- Any CORS default (still `[TBD]` — no live `OPTIONS` probe)
 - Any firewall, socket or systemd hardening directive
 - Any throughput, latency, RAM-headroom or NPU-utilisation figure
-- Any claim that a specific model tag loads or runs on the NPU
+- Any claim that a model *other than* `qwen2.5-it:3b` loads or runs on the NPU
 - Any statement that the X1 Pro deployment is production-ready
 
-### The one place a vendor assumption reached shipped code
+Two known gaps must not be quietly dropped:
 
-`FastFlowLmProvider.DEFAULT_BASE_URL` is `http://127.0.0.1:52625`, taken from vendor documentation
-rather than measurement — the one instance of an unverified value embedded in the build.
-`LlmProviderFactory` logs a startup warning whenever a non-Ollama provider runs on a default base
-URL that the operator did not configure, so the value cannot pass silently. `[IMPLEMENTED]`
+- **R7/R8 do not hold.** FastFlowLM hangs on an unknown model tag instead of returning an error. The client survives via its timeout, so model tags are an operational dependency.
+- **The app-to-model chat path is untested.** CompanionAI boots against FastFlowLM and `/api/stats` responds, but no `/api/chat` or `/api/chat/stream` request has been made through the app.
+
+### The vendor assumption that reached shipped code
+
+`FastFlowLmProvider.DEFAULT_BASE_URL` is `http://127.0.0.1:52625`, originally taken from vendor
+documentation rather than measurement — the one unverified value embedded in the build. It has since
+been confirmed: `flm port` reports `52625` and F1/F2 succeeded against it on the X1 Pro.
+
+The warning stays, deliberately. `[VALIDATED]` on one host does not make the value correct on another,
+and the failure mode is silent: an operator who never sets `LLM_BASE_URL` and points at a machine
+where the port differs gets a connection error rather than an obvious misconfiguration.
+`LlmProviderFactory` warns whenever a non-Ollama provider runs on a default base URL the operator did
+not configure. `[IMPLEMENTED]`, covered by `LlmProviderFactoryTest`.
 
 ## 6.2 Phase status
 
 | Phase | Content | Status |
 |---:|---|---|
-| 0 | This document, `X1Pro-FastFlowLM-Validation.md`, `Qwen-Model-Evaluation.md`, amend `X1Pro-Home-Hosting-Architecture.md` | Docs `[IMPLEMENTED]`; hardware validation `[TBD]` |
+| 0 | This document, `X1Pro-FastFlowLM-Validation.md`, `Qwen-Model-Evaluation.md`, amend `X1Pro-Home-Hosting-Architecture.md` | Docs `[IMPLEMENTED]`; Blocks 1–6 `[VALIDATED]`, 7–10 `[TBD]` |
 | 1 | `llm/` package: interface, capability record, message/exception types, shared transport, two providers, factory | `[IMPLEMENTED]` |
 | 2 | Additive configuration properties | `[IMPLEMENTED]` |
-| 3 | Mechanical consumer rewiring across the 8 files in §4.3; `LlmClient` deleted | `[IMPLEMENTED]` — 53 tests green |
-| 4 | New provider tests; `llmBench` and `llmParity` Gradle tasks; run both providers on both hosts | `[PLANNED]` — blocked on Gate B for the X1 Pro half |
+| 3 | Mechanical consumer rewiring across the 8 files in §4.3; `LlmClient` deleted | `[IMPLEMENTED]` |
+| 4 | New provider tests; `llmBench` and `llmParity` Gradle tasks; run both providers on both hosts | `[PARTIAL]` — provider tests done (`LlmProviderFactoryTest`, `FastFlowLmProviderTest`); `llmBench`/`llmParity` `[TBD]` |
 | 5 | `script/run.sh` consolidation; deployment unit and firewall | `[PLANNED]` — blocked on Gate B |
+
+Full suite: **75 tests green** (was 53 before this session; +12 factory, +10 FastFlowLM).
 
 Phases 4 and 5 may proceed on the **development** host. Only their X1 Pro halves are gated.
 
@@ -402,23 +431,25 @@ Phases 4 and 5 may proceed on the **development** host. Only their X1 Pro halves
 - [x] `campanionai.ollamaUrl` and `campanionai.numCtx` still honoured
 - [x] `campanionai.model` default unchanged
 - [x] All pre-existing tests still pass — 40 methods across the 7 original classes, plus 13 new
-      methods in `OpenAiCompatTransportTest` and `LlmIntentClassifierTest` = **53 green**
+      methods in `OpenAiCompatTransportTest` and `LlmIntentClassifierTest` = **53 green** at Gate A
+- [x] Factory configuration precedence and warning behaviour covered — 12 methods in `LlmProviderFactoryTest`
+- [x] FastFlowLM wire shape covered — 10 methods in `FastFlowLmProviderTest`
 - [x] Probes A1–A5 recorded in `Qwen-Model-Evaluation.md`
 
 ## X1 Pro (HX-370 + XDNA2 + FastFlowLM)
 
-- [ ] XDNA2 NPU detected
-- [ ] `flm validate` succeeds
-- [ ] `xrt-smi examine` lists the NPU
-- [ ] A supported Qwen model runs on the NPU
-- [ ] FastFlowLM API reachable from localhost
-- [ ] Probes F1–F5 recorded
-- [ ] CompanionAI can talk to FastFlowLM
-- [ ] Streaming works
-- [ ] Required features R1–R10 all satisfied
+- [x] XDNA2 NPU detected — `c6:00.1`, device `0x17f0`, rev `0x10`
+- [x] `flm validate` succeeds — `"ready": true`
+- [x] `xrt-smi examine` lists the NPU — `RyzenAI-npu4`, firmware `1.1.2.64`
+- [x] A supported Qwen model runs on the NPU — `qwen2.5-it:3b`
+- [x] FastFlowLM API reachable from localhost — `flm port` → `52625`
+- [x] Probes F1–F5 recorded — F1, F2, F4, F5 pass; F3 recorded as a failing requirement
+- [ ] **CompanionAI can talk to FastFlowLM** — app boots and `/api/stats` responds, but no `/api/chat` or `/api/chat/stream` request has been made through the app
+- [x] Streaming works — F2 against the runtime directly
+- [ ] Required features R1–R10 all satisfied — **R7/R8 do not hold**: an unknown model tag hangs instead of returning an error
 - [ ] Authentication works (CompanionAI side)
-- [ ] FastFlowLM is not reachable from the public Internet
-- [ ] FastFlowLM is not unnecessarily reachable from the LAN
+- [x] FastFlowLM is not reachable from the public Internet — confirmed from `94.2.13.93`
+- [x] FastFlowLM is not unnecessarily reachable from the LAN — confirmed from `192.168.0.82`
 
 ## Portability
 

@@ -47,15 +47,18 @@ Two consequences:
 | 2 | **Qwen3.5 approximately 9B** | dense, mid | Middle point. Tests whether quality gains justify the prefill cost. |
 | 3 | **`qwen3.6-moe:35b-a3b`** | MoE, large total / small active | Candidate the user specifically requested. Tests whether a sparse model can beat a dense one on a prefill-heavy workload despite higher total parameter count. |
 
-`[TBD]` **Exact model tags are not assumed.** Tags and version suffixes change between FastFlowLM releases. Discover the installed catalogue using `flm pull --help`, `flm list` and `flm cache list` per `X1Pro-FastFlowLM-Validation.md` §5.1, then record the resolved tags here.
+`[OBSERVED]` **Exact model tags are not assumed.** Tags and version suffixes change between FastFlowLM releases. The catalogue was enumerated on 2026-10-03 against FastFlowLM `1.0.7` with `flm list`; `flm cache list` is unsupported in that release and exits `1`, so `flm list --filter installed` is the equivalent.
 
-## 2.1 `[TBD]` Tag resolution
+## 2.1 Tag resolution
 
-| Candidate | Tag resolved from installed catalogue | Available for download |
+| Candidate | Tag resolved from installed catalogue | Installed locally? |
 |---|---|---|
+| Qwen2.5 IT 3B | `qwen2.5-it:3b` | **`[VALIDATED]` installed** — the only model pulled |
+| `qwen3.6-moe:35b-a3b` | present in the catalogue | `[OBSERVED]` remote (`⏬`), not pulled |
 | Qwen3 4B | `[TBD]` | `[TBD]` |
 | Qwen3.5 ~9B | `[TBD]` | `[TBD]` |
-| `qwen3.6-moe:35b-a3b` | `[TBD]` | `[TBD]` |
+
+`[OBSERVED]` **Only `qwen2.5-it:3b` is installed.** Every other catalogue entry is available for download but has not been pulled, so nothing has been measured on a second model. `qwen2.5-it:3b` is small (3B, instruction-tuned), and its one sample in F2 ran at roughly 42 tok/s prefill and 25 tok/s decode — a single non-representative measurement, not a benchmark. No ranking, no tok/s comparison table and no production model choice can be made from this. `[TBD]`
 
 `[TBD]` If a candidate is unavailable in the installed release, record that fact as a finding and evaluate the remaining candidates. Do not substitute a different model silently.
 

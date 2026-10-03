@@ -130,9 +130,9 @@ This document distinguishes what is already true from what is still intended. Co
                           X1 Pro -> GoDaddy API
 ```
 
-`[TBD]` `FLM_PORT` is **not yet known**. FastFlowLM documentation describes a default of `52625`, but the installed release's actual default must be read from `flm port` or the `flm serve` startup banner before any port is written into a firewall rule, a systemd unit or an Nginx configuration. See [X1Pro-FastFlowLM-Validation.md](X1Pro-FastFlowLM-Validation.md) §1.1.
+`[VALIDATED]` `FLM_PORT` is **`52625`**. `flm port` reports it, matching the documented default, and the loopback listener was confirmed reachable there. It is still an internal-only port and must not appear in any firewall rule, systemd unit or Nginx configuration that opens the machine to the Internet. See [X1Pro-FastFlowLM-Validation.md](X1Pro-FastFlowLM-Validation.md) §0.2.
 
-`[PLANNED]` FastFlowLM has **no authentication**. Its listener must therefore never be reachable from the Internet, and must not be unnecessarily reachable from the LAN. See §22.
+`[VALIDATED]` FastFlowLM has **no authentication**, so its listener must never be reachable from the Internet and must not be unnecessarily reachable from the LAN. Confirmed: `flm serve` binds `127.0.0.1` by default and was unreachable from both the LAN and the public Internet. The requirement is met by the runtime's defaults; the exposure that needs managing is **CompanionAI's own `0.0.0.0:8080`**, not FastFlowLM's. See §22.
 
 ### Network model
 
@@ -1119,16 +1119,31 @@ FastFlowLM        <- must never be exposed
 
 ## 22.4 Inputs required before this section can be completed
 
+Measured on the X1 Pro, 2026-10-03, against FastFlowLM `1.0.7`. Evidence:
+[X1Pro-FastFlowLM-Validation.md](X1Pro-FastFlowLM-Validation.md) §0.2.
+
 | Input | Source | Value |
 |---|---|---|
-| `FLM_PORT` | `flm port`, or the `flm serve` startup banner | `[TBD]` |
-| Bind address | `ss -ltnp \| grep <FLM_PORT>` | `[TBD]` |
-| Reachable from a second LAN host? | `curl` from another machine | `[TBD]` |
-| CORS default | `OPTIONS` preflight probe | `[TBD]` |
-| Bind-address flag exists? | `flm serve --help` | `[TBD]` |
+| `FLM_PORT` | `flm port` | `52625` — matches the documented default |
+| Bind address | `ss -ltnp \| grep 52625` | `[VALIDATED]` `127.0.0.1` |
+| Reachable from a second LAN host? | `curl` from `192.168.0.82` | `[VALIDATED]` no |
+| Reachable from the public Internet? | `curl` from `94.2.13.93` | `[VALIDATED]` no |
+| CORS default | `OPTIONS` preflight probe | `[TBD]` `--cors` documents `1`; not probed live |
+| Bind-address flag exists? | `flm serve --help` | `[VALIDATED]` `--host`, default `127.0.0.1` |
+| Authentication | — | `[OBSERVED]` none enforced; loopback binding is the only control |
 | Network requirements of the service | §22.6 | `[TBD]` |
 
-Recording template: [X1Pro-FastFlowLM-Validation.md](X1Pro-FastFlowLM-Validation.md) §6.3 and §11.
+**What this settles.** The bind-address question in §22.4 was the gate for the
+whole hardening section, and it is now answered in the safest possible direction:
+the listener is loopback-only by default and was confirmed unreachable from both
+the LAN and the Internet. `[VENDOR]` FastFlowLM has no authentication, so
+loopback binding is doing all the work — but on this release, by default, it is
+enough. The deployment therefore does not need a bind-address restriction, a
+firewall exception for port 52625, or any other network control for FastFlowLM.
+
+**What this does not settle.** CORS is still `[TBD]`. Model download behaviour,
+service-unit hardening and the systemd design in §22.6 remain unrecorded, and no
+firewall or systemd directive in this document has been validated.
 
 ## 22.5 Decision tree
 
@@ -1188,21 +1203,22 @@ Verification:          <commands proving loopback-only>
 
 | Phase | Content | Gate |
 |---:|---|---|
-| 0 | Phase 0 documentation and X1 Pro validation | `flm validate` succeeds and one supported Qwen model runs on the NPU |
+| 0 | Phase 0 documentation and X1 Pro validation | `[VALIDATED]` for Blocks 1–6; Blocks 7–10 `[TBD]` |
 | 1 | `LlmProvider` abstraction, shared OpenAI-compatible transport, Ollama and FastFlowLM providers | — |
 | 2 | Additive provider configuration properties | — |
-| 3 | Consumer rewiring | Existing test suite green |
-| 4 | Provider tests; `llmBench` / `llmParity`; run on both hosts | Bake-off complete |
-| 5 | `script/run.sh` consolidation; service unit and firewall for FastFlowLM | Acceptance criteria met |
+| 3 | Consumer rewiring | Existing test suite green — **75 tests** |
+| 4 | Provider tests; `llmBench` / `llmParity`; run on both hosts | `[PARTIAL]` provider tests done; bake-off `[TBD]` |
+| 5 | `script/run.sh` consolidation; service unit and firewall for FastFlowLM | `[PARTIAL]` launcher done; unit and firewall `[TBD]` |
 
-`[PLANNED]` Deployment sequencing. FastFlowLM must be proven working on the X1 Pro **before** CompanionAI is pointed at it in anger. If CompanionAI is deployed first, it stays on Ollama until Phase 0 exits.
+`[VALIDATED]` Deployment sequencing. FastFlowLM was proven working on the X1 Pro **before** CompanionAI was pointed at it: `flm validate` passed, `xrt-smi` independently listed the NPU, `qwen2.5-it:3b` generated on the NPU, and probes F1–F5 ran before any `./gradlew run` against it.
 
 `[IMPLEMENTED]` The provider abstraction itself was **not** held behind this gate. Writing a
 runtime-neutral boundary introduces no assumption about the target host, so it was allowed to
 proceed and is covered by tests against a stub. What remains gated is every deployment and
 performance decision below — see `LLM-Provider-Architecture.md` §6.1 for the Gate A / Gate B split.
-In particular, the firewall, socket and systemd decisions in §22 stay `[TBD]` until the bind address
-is observed.
+The bind address in §22.4 is now `[VALIDATED]` as `127.0.0.1` and unreachable externally, which
+retires the biggest open question in this document. The firewall, socket and systemd directives in
+§22 stay `[TBD]` because nothing has been selected or tested.
 
 ---
 
