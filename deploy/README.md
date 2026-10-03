@@ -187,8 +187,19 @@ arriving at the end.
 
 ```bash
 # A record for companionai.runningcode.dev -> the X1's public IP, then:
-sudo certbot --nginx -d companionai.runningcode.dev
+sudo mkdir -p /var/www/acme
+sudo certbot --webroot -w /var/www/acme -d companionai.runningcode.dev
 ```
+
+Use `--webroot`, **not** `--nginx`. The site config already declares
+`location /.well-known/acme-challenge/ { root /var/www/acme; }`, and `--nginx` works by
+injecting a challenge `location` of its own into the server block. Two matching locations in
+one block is a `duplicate location` error, so `nginx -t` fails and the server will not reload.
+`--webroot` satisfies the challenge through the location that is already there and never edits
+the config, which also keeps renewal from rewriting a file under version control.
+
+Run it only after the port 80 redirect is live, or the challenge request gets a 301 and
+certbot reports it as unreachable.
 
 ## 7. Full path verification
 
@@ -345,6 +356,21 @@ it must not point into a developer's home directory.
 
 Symptom shape to recognise: exit 1 at ~11 ms CPU and ~3 MB peak memory. Tomcat never
 starts, so nothing about the app, the ports or FastFlowLM is implicated.
+
+### `nginx: [emerg] unknown directive "http2"`
+
+The config uses the standalone `http2 on;` form, which needs nginx 1.25.1 or newer. On an
+older release, fold it into the listen directive instead:
+
+```nginx
+listen 443 ssl http2;
+```
+
+### `duplicate location /.well-known/acme-challenge/`
+
+A previous `certbot --nginx` run injected a challenge location next to the one already in
+`deploy/nginx/companionai.conf`. Delete the injected copy and use `--webroot` from step 6,
+which never touches the config.
 
 ## Rollback
 
