@@ -42,6 +42,9 @@ class ConfigTest {
         System.clearProperty("campanionai.allowPrivateFetch");
     }
 
+    /** Last reflective failure, kept so a skipped test can explain itself. */
+    private static String environmentFailure = "none";
+
     /**
      * Sets an environment variable for the duration of the test, or skips the test when the
      * JVM refuses reflective access.
@@ -50,7 +53,10 @@ class ConfigTest {
      * {@code theCaseInsensitiveEnvironment}, on Linux by {@code theEnvironment}.
      */
     private void withEnv(String key, String value) {
-        assumeTrue(setEnvironment(key, value), "JVM refuses reflective environment mutation");
+        assumeTrue(setEnvironment(key, value),
+                "Process environment is not mutable in this JVM (" + environmentFailure
+                        + "). The test JVM needs --add-opens java.base/java.lang=ALL-UNNAMED;"
+                        + " check tasks.named('test') { jvmArgs ... } in build.gradle.");
         injected.add(key);
     }
 
@@ -76,8 +82,10 @@ class ConfigTest {
                     map.put(key, value);
                 }
             }
+            environmentFailure = "none";
             return true;
         } catch (ReflectiveOperationException | RuntimeException e) {
+            environmentFailure = e.getClass().getSimpleName() + ": " + e.getMessage();
             return false;
         }
     }

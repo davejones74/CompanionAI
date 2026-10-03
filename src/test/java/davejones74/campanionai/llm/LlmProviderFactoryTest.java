@@ -239,9 +239,12 @@ class LlmProviderFactoryTest {
     @Test
     void readsEnvironmentVariablesWhenNoPropertyIsSet() {
         clearConfiguration();
-        setEnvironment("LLM_PROVIDER", "ollama");
-        setEnvironment("LLM_MODEL", "env-model");
-        setEnvironment("LLM_TEMPERATURE", "0.42");
+        // Environment variables are the deployment path: /etc/companionai/companionai.env.
+        // A JVM that cannot mutate its own environment would leave that path untested, so
+        // this fails loudly rather than skipping.
+        assertTrue(setEnvironment("LLM_PROVIDER", "ollama"), environmentUnavailable());
+        assertTrue(setEnvironment("LLM_MODEL", "env-model"), environmentUnavailable());
+        assertTrue(setEnvironment("LLM_TEMPERATURE", "0.42"), environmentUnavailable());
 
         LlmProvider provider = LlmProviderFactory.fromSystemProperties();
 
@@ -249,9 +252,17 @@ class LlmProviderFactoryTest {
         assertEquals(0.42, provider.temperature(), 1e-9);
     }
 
+    /** Last reflective failure, kept so a broken environment can explain itself. */
+    private static String environmentFailure = "none";
+
     /**
-     * Reflectively writes to the process environment. Returns {@code false} when the JVM refuses,
-     * which is the case on some runtimes, so callers can assert against the property path instead.
+     * Reflectively writes to the process environment.
+     *
+     * <p>Returns {@code false} and records the reason when the JVM refuses, which happens
+     * without {@code --add-opens java.base/java.lang=ALL-UNNAMED}. The reason is surfaced in
+     * the assertion message: silently skipping turned a missing JVM flag into a test
+     * failure reading "expected env-model but was qwen3.6:27b", which points at the
+     * factory rather than at the build.
      */
     private static boolean setEnvironment(String key, String value) {
         try {
@@ -267,10 +278,18 @@ class LlmProviderFactoryTest {
                     map.put(key, value);
                 }
             }
+            environmentFailure = "none";
             return true;
         } catch (ReflectiveOperationException | RuntimeException e) {
+            environmentFailure = e.getClass().getSimpleName() + ": " + e.getMessage();
             return false;
         }
+    }
+
+    private static String environmentUnavailable() {
+        return "Process environment is not mutable in this JVM (" + environmentFailure
+                + "). The test JVM needs --add-opens java.base/java.lang=ALL-UNNAMED; check"
+                + " tasks.named('test') { jvmArgs ... } in build.gradle.";
     }
 
     @SuppressWarnings("unchecked")
