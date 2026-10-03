@@ -1,0 +1,64 @@
+# CompanionAI deployment artifacts for the X1 Pro.
+#
+# Stage 1 of each unit is deliberately conservative: it contains only directives that
+# cannot plausibly break NPU access. Phase 2 hardening is present but commented out,
+# with the specific reason it might fail. Add one directive, verify, then continue.
+# Do not paste the whole phase-2 block in untested.
+
+[Unit]
+Description=FastFlowLM inference runtime (AMD NPU / XDNA2)
+Documentation=https://github.com/fastflow-ai/FastFlowLM
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=fastflowlm
+Group=fastflowlm
+
+# CORS off: the runtime is loopback-only and Nginx is the only public entry point.
+# Confirm the binary path on your host with:  command -v flm
+ExecStart=/usr/bin/flm serve --cors 0
+
+# Model tags are operational dependencies (R7/R8): FastFlowLM does not 404 on an
+# unknown tag, it hangs until the client's timeout. So do not restart rapidly.
+Restart=on-failure
+RestartSec=10
+TimeoutStartSec=300
+TimeoutStopSec=30
+
+# --- Stage 1: low-risk hardening -------------------------------------------------
+NoNewPrivileges=yes
+PrivateTmp=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+# --- Phase 2: verify each on the X1 before enabling ------------------------------
+#
+# ProtectSystem=full makes /usr, /boot and /etc read-only.
+# ProtectHome=read-only still lets the runtime read a model cache under /home, but
+#   forbids writes there. If flm serve needs to write a tokenizer or compiled cache
+#   next to the model, use ReadWritePaths= for the cache directory instead.
+# ProtectSystem=full
+# ProtectHome=read-only
+# ProtectKernelTunables=yes
+# ProtectKernelModules=yes
+# ProtectControlGroups=yes
+# RestrictNamespaces=yes
+# RestrictRealtime=yes
+# SystemCallArchitectures=native
+# RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+#
+# Device access: enumerate what XRT actually opens, then allow exactly those.
+#   ls -l /dev/accel /dev/dri
+# DevicePolicy=closed
+# DeviceAllow=/dev/accel/accel0 rw
+# DeviceAllow=/dev/dri/renderD128 rw
+#
+# The user must belong to every group XRT needs. Compare against your working shell:
+#   id -a fastflowlm
+#   id -a
+# and add the missing ones (typically 'render', sometimes 'video').
+
+[Install]
+WantedBy=multi-user.target

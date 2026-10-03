@@ -392,7 +392,7 @@ as fact, shipped as a default, or marked `[VALIDATED]`:
 Two known gaps must not be quietly dropped:
 
 - **R7/R8 do not hold.** FastFlowLM hangs on an unknown model tag instead of returning an error. The client survives via its timeout, so model tags are an operational dependency.
-- **The app-to-model chat path is untested.** CompanionAI boots against FastFlowLM and `/api/stats` responds, but no `/api/chat` or `/api/chat/stream` request has been made through the app.
+- **The app-to-model chat path is now `[VALIDATED]`.** `[VALIDATED]` 2026-10-03 on the X1 Pro: `script/e2e-fastflowlm.sh` passed 26 of 26 assertions, covering `/api/chat` and `/api/chat/stream` through `LlmProvider` → `FastFlowLmProvider` → `OpenAiCompatTransport` → FastFlowLM → Qwen on the NPU. `/api/chat/stream` delivered 33 delta events across 1330 ms with a 410 ms worst-case inter-chunk gap, against ~3 ms for a buffered body of the same payload. `think: false` was accepted, closing the F5 uncertainty. See [X1Pro-E2E-Chat-Test.md](X1Pro-E2E-Chat-Test.md).
 
 ### The vendor assumption that reached shipped code
 
@@ -444,8 +444,8 @@ Phases 4 and 5 may proceed on the **development** host. Only their X1 Pro halves
 - [x] A supported Qwen model runs on the NPU — `qwen2.5-it:3b`
 - [x] FastFlowLM API reachable from localhost — `flm port` → `52625`
 - [x] Probes F1–F5 recorded — F1, F2, F4, F5 pass; F3 recorded as a failing requirement
-- [ ] **CompanionAI can talk to FastFlowLM** — app boots and `/api/stats` responds, but no `/api/chat` or `/api/chat/stream` request has been made through the app
-- [x] Streaming works — F2 against the runtime directly
+- [x] **CompanionAI can talk to FastFlowLM** — `[VALIDATED]` 2026-10-03, `script/e2e-fastflowlm.sh`, 26/26 assertions
+- [x] Streaming works — F2 against the runtime directly, and `[VALIDATED]` end to end through the app (33 deltas over 1330 ms)
 - [ ] Required features R1–R10 all satisfied — **R7/R8 do not hold**: an unknown model tag hangs instead of returning an error
 - [ ] Authentication works (CompanionAI side)
 - [x] FastFlowLM is not reachable from the public Internet — confirmed from `94.2.13.93`

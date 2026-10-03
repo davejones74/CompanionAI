@@ -245,19 +245,30 @@ is not reachable from the LAN or the Internet, so FastFlowLM's `/v1/` surface ne
 network control. CompanionAI is the component that must be protected, and it defaults to
 `0.0.0.0:8080`.
 
-### End-to-end: `[OBSERVED]` app boots, chat path not yet exercised
+### End-to-end: `[VALIDATED]` app-to-model path confirmed
 
 ```bash
-./gradlew run \
-  -Dcompanionai.llm.provider=fastflowlm \
-  -Dcompanionai.llm.model=qwen2.5-it:3b \
-  -Dcompanionai.llm.baseUrl=http://127.0.0.1:52625
+bash script/e2e-fastflowlm.sh
 ```
 
-CompanionAI started cleanly against FastFlowLM, Tomcat reported healthy, `GET /` returned the UI
-HTML and `GET /api/stats` returned valid JSON. **No `/api/chat` or `/api/chat/stream` request has been
-made through CompanionAI**, so the application-to-model path is untested end to end even though F1/F2
-pass against the runtime directly. See [X1Pro-E2E-Chat-Test.md](X1Pro-E2E-Chat-Test.md).
+`[VALIDATED]` 2026-10-03. All 26 assertions passed. CompanionAI generated through
+`LlmProvider` → `FastFlowLmProvider` → `OpenAiCompatTransport` → FastFlowLM → Qwen on the NPU.
+
+| Measurement | Value |
+|---|---|
+| `/api/chat` | 5527 ms round trip, 139 chars, `offline=false` |
+| `/api/chat/stream` | 33 delta events over 1330 ms, worst inter-chunk gap 410 ms |
+| Terminator | `{"done":true,"offline":false}` |
+| `think: false` | accepted on both requests — closes the F5 uncertainty |
+
+`offline=false` is decisive: `ModelServlet` sets it only on `LlmException`, in which case the body
+would carry `[LLM unavailable - offline reply]`. The streaming spread of 1330 ms, against ~3 ms for a
+buffered body of the same payload, establishes that the response is genuinely incremental rather
+than assembled and flushed at the end.
+
+Full evidence, method and thresholds: [X1Pro-E2E-Chat-Test.md](X1Pro-E2E-Chat-Test.md).
+
+See [X1Pro-E2E-Chat-Test.md](X1Pro-E2E-Chat-Test.md).
 
 ### Corrections to earlier assumptions
 
@@ -637,14 +648,27 @@ The order below is fixed. Work down it only after §6.3 is filled in.
 
 ### 10.5 Establish how FastFlowLM needs to communicate
 
-`[TBD]` Complete this before selecting any hardening directive.
+`[VALIDATED]` 2026-10-03. Answers below; the enforceable version lives in §22.6 of
+`X1Pro-Home-Hosting-Architecture.md`.
 
 | Question | Value |
 |---|---|
-| TCP socket only, or does it need a local UNIX socket? | `[TBD]` |
-| Does the CompanionAI JVM need to share the same network namespace? | `[TBD]` |
-| Does FastFlowLM require any outbound network access (telemetry, model pull)? | `[TBD]` |
-| Which directives does the installed release tolerate? | `[TBD]` |
+| TCP socket only, or does it need a local UNIX socket? | `[VALIDATED]` **TCP only.** The API is plain HTTP over `127.0.0.1:52625`. `OpenAiCompatTransport` speaks HTTP and the 26-assertion E2E run completed through it. No UNIX socket participates. |
+| Does the CompanionAI JVM need to share the same network namespace? | `[VALIDATED]` **Not a shared namespace, but a shared loopback.** Both processes must reach the same `127.0.0.1`. In systemd's default (host) namespace this holds. `PrivateNetwork=yes` on **either** unit gives that unit a private netns in which the host's loopback listener is invisible, which breaks the model path silently — CompanionAI keeps running and every reply becomes `offline=true`. |
+| Does FastFlowLM require any outbound network access (telemetry, model pull)? | `[OBSERVED]` **No, not at serve time.** Serving, model discovery, streaming and generation all completed with no outbound call. No telemetry appeared in the serve log. `flm pull` reported `Model already downloaded`, so no fetch was attempted and the *download* path remains untested — see the caveat below. |
+| Which directives does the installed release tolerate? | `[PARTIAL]` Conservative set is deployed: `NoNewPrivileges`, `PrivateTmp`, `RestrictSUIDSGID`, `LockPersonality`. Device and filesystem confinement are **untested** — they depend on what XRT opens, which has not been enumerated. |
+
+**What "no outbound needed" does not prove.** `flm pull` short-circuits when the model is present, so the
+only real download was never exercised. Pulling a model for the first time does contact HuggingFace. That
+is an operator action performed by hand, never by the service. Consequently the enforceable rule is
+narrower than "FastFlowLM never touches the network":
+
+> **The running service must not pull models.** Models are fetched by hand with `flm pull` while the
+> service is stopped; `fastflowlm.service` never runs it. If egress is ever restricted on the host, keep
+> the pull path available at least until the production model is settled by the bake-off.
+
+This is the basis for `IPAddressDeny=any` + `IPAddressAllow=localhost` as a *phase 2* hardening option:
+it would block a stray download, at the cost of requiring pulls to be done outside the unit.
 
 ### 10.6 If the listener binds to `0.0.0.0`
 

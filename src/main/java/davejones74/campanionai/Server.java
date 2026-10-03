@@ -10,9 +10,9 @@ import java.io.File;
 
 public class Server {
     public static void main(String[] args) throws Exception {
-        String host = System.getProperty("campanionai.host", "0.0.0.0");
-        int port = Integer.getInteger("campanionai.port", 8080);
-        String authToken = System.getProperty("campanionai.authToken");
+        String host = Config.string("campanionai.host", "COMPANIONAI_HOST", "0.0.0.0");
+        int port = Config.integer("campanionai.port", "COMPANIONAI_PORT", 8080);
+        String authToken = Config.string("campanionai.authToken", "COMPANIONAI_AUTH_TOKEN", null);
 
         Tomcat tomcat = new Tomcat();
         tomcat.setPort(port);

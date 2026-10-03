@@ -1,6 +1,36 @@
 # CompanionAI → FastFlowLM end-to-end chat validation
 
-**Status:** `[TBD]` — not yet run. This is the gate for the X1 Pro deployment.
+**Status:** `[VALIDATED]` on the X1 Pro, 2026-10-03. 26 of 26 assertions passed. Measurements below.
+
+## Result
+
+```text
+=== Result
+  passed: 26
+  failed: 0
+
+E2E PASSED - CompanionAI generates through FastFlowLM on the NPU,
+and /api/chat/stream delivers incrementally.
+```
+
+| Measurement | Value |
+|---|---|
+| Assertions | 26 passed, 0 failed |
+| `/api/chat` round trip | 5527 ms |
+| `/api/chat` reply | 139 chars, `offline=false`, no fallback marker |
+| `/api/chat/stream` deltas | 33 delta events, 34 SSE events total |
+| `/api/chat/stream` spread | first delta → last delta **1330 ms** |
+| `/api/chat/stream` worst inter-chunk gap | **410 ms** |
+| `/api/chat/stream` wall clock | 3938 ms |
+| Terminator | `{"done":true,"offline":false}` received |
+| Final `/api/stats` | `total:2 streamed:1 jsonReplies:1 offline:0 outputTokens:84` |
+
+The streaming numbers are the load-bearing evidence. A buffered response of the same payload
+measures ~3 ms spread; this measured 1330 ms with a 410 ms worst gap, roughly 400× the buffered
+baseline. The provider, the transport and the servlet are all confirmed streaming.
+
+`think: false` was sent on both requests and was accepted — that closes the remaining F5
+uncertainty recorded in `FastFlowLmProvider`'s JavaDoc.
 
 ## What this closes
 
@@ -75,6 +105,28 @@ Thresholds are overridable if the model turns out to be unusually fast:
 ```bash
 MIN_SPREAD_MS=800 MIN_MAXGAP_MS=250 bash script/e2e-fastflowlm.sh
 ```
+
+Both replies were correct, non-degenerate answers to the prompt, which rules out a canned `ChatRules`
+match producing the text.
+
+## What this does not prove
+
+**The intent classifier is not covered.** `ModelServlet` defaults `liveLlmMode=true`, so
+`LlmIntentClassifier` issues an extra non-streaming `llm.chat()` call per request whenever
+`RuleIntentClassifier` finds no match. `LlmIntentClassifier` catches every exception and returns
+`Intent.NONE`, so a classifier failure is invisible to every assertion in this test, and its tokens
+are not counted in `/api/stats` (`addOutputTokens` is only called from the two chat handlers).
+
+`liveAttempts: 0` does **not** mean the classifier was skipped — that counter records whether an
+external retrieval provider returned items, not whether classification ran. Confirm with:
+
+```bash
+# while the stream above is running, count POSTs in the flm serve terminal:
+#   2 completions per request == classifier ran (1 classifier + 1 reply)
+```
+
+This matters for capacity planning, not for correctness of the model path: every user message may
+cost two NPU generations.
 
 ## What it does not touch
 

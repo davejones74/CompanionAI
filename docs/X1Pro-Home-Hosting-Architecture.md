@@ -797,25 +797,40 @@ CompanionAI's public-facing configuration should use an authentication token.
 `[CURRENT]` Example application properties:
 
 ```text
+# command line — visible to every local user in `ps -ef`. Development only.
 campanionai.host=0.0.0.0
 campanionai.port=8080
 campanionai.authToken=<SECRET>
-campanionai.ollamaUrl=http://localhost:11434
 campanionai.allowPrivateFetch=false
+
+# environment — readable only via /proc/<pid>/environ, i.e. by the service user and root.
+COMPANIONAI_HOST=127.0.0.1
+COMPANIONAI_PORT=8080
+COMPANIONAI_AUTH_TOKEN=<SECRET>
+COMPANIONAI_ALLOW_PRIVATE_FETCH=false
 ```
 
-`[PLANNED]` Planned provider-aware properties. **Not implemented.** The existing properties above continue to work unchanged.
+`[VALIDATED]` 2026-10-03. Both forms work; the environment variable is the one to use in production,
+for the reason given in §22.6.1.
+
+`[IMPLEMENTED]` Planned provider-aware properties, **now implemented**. `LlmProviderFactory` resolves
+these with system property → environment → default precedence:
 
 ```text
-campanionai.llm.provider=fastflowlm
-campanionai.llm.baseUrl=http://127.0.0.1:<FLM_PORT>
-campanionai.llm.think=false
-campanionai.model=<TAG_RESOLVED_DURING_BAKEOFF>
+campanionai.llm.provider=fastflowlm             # or LLM_PROVIDER
+campanionai.llm.baseUrl=http://127.0.0.1:52625   # or LLM_BASE_URL
+campanionai.llm.think=false                     # or LLM_THINK
+campanionai.llm.model=qwen2.5-it:3b             # or LLM_MODEL
 ```
 
-`[TBD]` `FLM_PORT` and `TAG` are both unknown until the Phase 0 runbook and the bake-off are complete. See [X1Pro-FastFlowLM-Validation.md](X1Pro-FastFlowLM-Validation.md) and [Qwen-Model-Evaluation.md](Qwen-Model-Evaluation.md).
+`[PARTIAL]` `FLM_PORT` is `[VALIDATED]` as **52625**. The model tag is `[TBD]` until the bake-off settles the
+production artefact; `qwen2.5-it:3b` is the tag all deployment validation was performed against. See
+[X1Pro-FastFlowLM-Validation.md](X1Pro-FastFlowLM-Validation.md) and [Qwen-Model-Evaluation.md](Qwen-Model-Evaluation.md).
 
-`[PLANNED]` One naming discrepancy to be resolved during implementation: the existing property namespace is misspelled `campanionai.*` (double `n`), while the planned new keys use the correctly spelled `companionai.llm.*`. The legacy names will be retained. This is recorded in [LLM-Provider-Architecture.md](LLM-Provider-Architecture.md) §4.4.
+`[VALIDATED]` The naming discrepancy noted during planning is now settled: `campanionai.llm.*` (double `n`)
+is the spelling in use, not a retained legacy form. The environment tier introduced by `Config` follows the
+correct `COMPANIONAI_*` spelling, so the two differ only at the property tier. Recorded in
+[LLM-Provider-Architecture.md](LLM-Provider-Architecture.md) §4.4.
 
 The repository specifically recommends setting `campanionai.authToken` for public hosting and keeping `campanionai.allowPrivateFetch=false` as an SSRF protection.
 
@@ -1171,15 +1186,66 @@ Work down this list **in order**, and only after §22.4 is filled in. Do not ski
 
 ## 22.6 Establish how FastFlowLM needs to communicate
 
-`[TBD]` Complete this before selecting any hardening directive.
+`[VALIDATED]` 2026-10-03. Full evidence and the reasoning behind each answer:
+[X1Pro-FastFlowLM-Validation.md](X1Pro-FastFlowLM-Validation.md) §10.5.
 
 | Question | Value |
 |---|---|
-| TCP socket only, or is a local UNIX socket used? | `[TBD]` |
-| Must the CompanionAI JVM share the same network namespace? | `[TBD]` |
-| Is outbound network access required, for example telemetry or model download? | `[TBD]` |
-| Does model download happen once manually, or automatically at service start? | `[TBD]` |
-| Which hardening directives does the installed release tolerate? | `[TBD]` |
+| TCP socket only, or is a local UNIX socket used? | `[VALIDATED]` **TCP only** — plain HTTP on `127.0.0.1:52625`. No UNIX socket participates. |
+| Must the CompanionAI JVM share the same network namespace? | `[VALIDATED]` **No shared namespace, but a shared loopback.** systemd's default namespace satisfies this. `PrivateNetwork=yes` on either unit breaks the path silently — the JVM still starts and every reply degrades to `offline=true`. |
+| Is outbound network access required, for example telemetry or model download? | `[OBSERVED]` **No, not at serve time.** Serving, discovery, streaming and generation completed with no outbound call and no telemetry in the log. |
+| Does model download happen once manually, or automatically at service start? | `[OBSERVED]` **Once, manually**, via `flm pull`, while the service is stopped. Never at service start. |
+| Which hardening directives does the installed release tolerate? | `[PARTIAL]` Conservative set deployed and expected to work: `NoNewPrivileges`, `PrivateTmp`, `RestrictSUIDSGID`, `LockPersonality`. Filesystem and device confinement **untested** — they depend on what XRT opens, which has not yet been enumerated. |
+
+**The caveat that matters.** `flm pull` short-circuits when the model is already present, so the only
+real download was never exercised. The enforceable rule is therefore narrower than "FastFlowLM never
+touches the network": **the running service must not pull models.** Downloads are an operator action.
+This is what makes `IPAddressDeny=any` + `IPAddressAllow=localhost` viable as a phase-2 control — it
+would block a stray download, at the cost of performing pulls outside the unit.
+
+### Chosen configuration
+
+```text
+FLM_PORT:              52625
+Bind address:          127.0.0.1 (loopback) — confirmed unreachable from
+                       LAN 192.168.0.82 and Internet 94.2.13.93
+Firewal rule:          none needed — the bind is already loopback-only
+systemd unit:          deploy/systemd/fastflowlm.service
+CompanionAI unit:      deploy/systemd/companionai.service  (After=, not Requires=)
+Env file:              /etc/companionai/companionai.env  (root:root 0600)
+Nginx site:            deploy/nginx/companionai.conf
+Hardening (stage 1):   NoNewPrivileges, PrivateTmp,
+                       RestrictSUIDSGID, LockPersonality
+Rejected:              PrivateNetwork — breaks the loopback model path (§22.5)
+Pending test:          ProtectSystem, ProtectHome, ReadWritePaths,
+                       DevicePolicy, RestrictAddressFamilies,
+                       IPAddressDeny/Allow
+Verification:          ss -ltnp | grep 52625
+                       systemctl is-enabled fastflowlm companionai
+                       systemctl show companionai --property=Environment   # root-only
+```
+
+### 22.6.1 The auth-token deployment constraint
+
+`[IMPLEMENTED]` A root-only environment file was requested for the auth token. That was **not
+possible** against the code as it stood, and the reason is worth recording because it is a general
+hazard rather than a one-off.
+
+`Server.java` read the token via `System.getProperty("campanionai.authToken")`, which consults only
+system properties. A systemd `EnvironmentFile=` can populate the process environment, but the sole
+route from an environment variable into a system property is a `-D` argument on the command line —
+and `-D` arguments are world-readable through `ps -ef`. Satisfying the requirement by passing the
+secret as `-D` would have delivered the opposite of what was asked for.
+
+The fix is `Config`, a lookup with system-property → environment → default precedence, matching the
+convention `LlmProviderFactory` already used. `Server` and `ModelServlet` now read `host`, `port`,
+`authToken`, `dataDir` and `allowPrivateFetch` through it. Historical property names keep their
+`campanionai.*` misspelling, so existing command lines and start scripts are unaffected. Covered by
+`ConfigTest` (11 tests).
+
+Two deliberate choices in `Config.bool` and `Config.integer`: an unparseable value falls back to the
+default rather than throwing, because a typo in an environment file must not abort startup, and
+because `allowPrivateFetch` is an SSRF control an unrecognised value must **fail closed**.
 
 ## 22.7 Record the final configuration here
 
@@ -1206,9 +1272,9 @@ Verification:          <commands proving loopback-only>
 | 0 | Phase 0 documentation and X1 Pro validation | `[VALIDATED]` for Blocks 1–6; Blocks 7–10 `[TBD]` |
 | 1 | `LlmProvider` abstraction, shared OpenAI-compatible transport, Ollama and FastFlowLM providers | — |
 | 2 | Additive provider configuration properties | — |
-| 3 | Consumer rewiring | Existing test suite green — **75 tests** |
+| 3 | Consumer rewiring | Existing test suite green — **86 tests**, 0 failures |
 | 4 | Provider tests; `llmBench` / `llmParity`; run on both hosts | `[PARTIAL]` provider tests done; bake-off `[TBD]` |
-| 5 | `script/run.sh` consolidation; service unit and firewall for FastFlowLM | `[PARTIAL]` launcher done; unit and firewall `[TBD]` |
+| 5 | `script/run.sh` consolidation; service unit and firewall for FastFlowLM | `[VALIDATED]` launcher, unit and Nginx config authored in `deploy/`; awaiting install on the X1 |
 
 `[VALIDATED]` Deployment sequencing. FastFlowLM was proven working on the X1 Pro **before** CompanionAI was pointed at it: `flm validate` passed, `xrt-smi` independently listed the NPU, `qwen2.5-it:3b` generated on the NPU, and probes F1–F5 ran before any `./gradlew run` against it.
 

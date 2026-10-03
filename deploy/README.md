@@ -1,0 +1,163 @@
+# X1 Pro deployment
+
+Artifacts for running CompanionAI on the X1 Pro with FastFlowLM on the NPU. Nothing here is
+containerised: two systemd units and one Nginx site, in that order.
+
+| File | Purpose |
+|---|---|
+| `systemd/fastflowlm.service` | NPU inference runtime, loopback only |
+| `systemd/companionai.service` | Tomcat app, ordered after the above |
+| `companionai.env.example` | root-only configuration, including the auth token |
+| `nginx/companionai.conf` | TLS terminator with SSE-safe proxying |
+
+Two things to read before starting:
+
+- **`ProtectHome` and `ProtectSystem` are commented out.** Each unit ships a conservative stage 1 and
+  a commented stage 2. Enable one directive at a time and re-verify. Aggressive filesystem or device
+  confinement interacts with XRT in ways this host has not yet been asked to prove.
+- **`PrivateNetwork` must never be enabled.** It would put the unit in a private network namespace
+  where the host's `127.0.0.1:52625` is invisible. CompanionAI would still start and every reply
+  would silently degrade to `offline=true`.
+
+## 1. Accounts and directories
+
+```bash
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin fastflowlm
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin companionai
+
+# Match the groups XRT needs. Compare against your working shell first:
+id -a
+sudo usermod -aG render fastflowlm      # if `id -a` shows render for a working session
+sudo usermod -aG video  fastflowlm
+
+sudo mkdir -p /var/lib/companionai/data
+sudo chown -R companionai:companionai /var/lib/companionai
+```
+
+## 2. Deploy the application
+
+Build a distribution and install it to a path that is not a git working tree, so a redeploy cannot
+overwrite live data:
+
+```bash
+./gradlew installDist
+sudo mkdir -p /opt/companionai
+sudo cp -r build/install/CompanionAI/. /opt/companionai/
+```
+
+## 3. The environment file, including the auth token
+
+```bash
+sudo install -d -o root -g root -m 0755 /etc/companionai
+sudo install -o root -g root -m 0600 deploy/companionai.env.example /etc/companionai/companionai.env
+sudoedit /etc/companionai/companionai.env
+openssl rand -hex 32      # paste into COMPANIONAI_AUTH_TOKEN
+```
+
+`0600` root-owned is correct: systemd reads `EnvironmentFile=` as root before dropping to
+`User=companionai`, so the service user never reads the file.
+
+The token goes in the environment, not in `COMPANION_AI_OPTS`. `-D` arguments are world-readable in
+`ps -ef`; environment variables are readable only through `/proc/<pid>/environ`.
+
+## 4. Units
+
+```bash
+sudo cp deploy/systemd/fastflowlm.service /etc/systemd/system/
+sudo cp deploy/systemd/companionai.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now fastflowlm.service
+```
+
+Check `command -v flm` first and correct `ExecStart` if it is not `/usr/bin/flm`.
+
+Verify the runtime before starting the app — this isolates failures:
+
+```bash
+systemctl status fastflowlm
+flm port
+curl -sS http://127.0.0.1:52625/v1/models
+ss -ltnp | grep 52625      # must show 127.0.0.1, never 0.0.0.0 or *
+```
+
+Then the app:
+
+```bash
+sudo systemctl enable --now companionai.service
+systemctl status companionai
+curl -sS http://127.0.0.1:8080/api/stats
+```
+
+Expect `[VALIDATED]` stream behaviour locally — deltas arriving word by word:
+
+```bash
+curl -sSN -X POST http://127.0.0.1:8080/api/chat/stream \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"In exactly three short sentences, explain what a database index is."}'
+```
+
+### Why `After=` and not `Requires=`
+
+`companionai.service` declares `After=fastflowlm.service` for ordering, which is what was asked.
+It deliberately does **not** declare `Requires=`, which would additionally couple lifetimes and stop
+the app whenever the runtime stops. `ModelServlet` already handles a dead provider by returning a
+tagged reply with `offline=true`; coupling lifetimes would take the UI down instead of degrading it.
+
+Change this only if you prefer no UI at all to a UI that cannot answer.
+
+## 5. Nginx
+
+```bash
+sudo cp deploy/nginx/companionai.conf /etc/nginx/sites-available/companionai
+sudo ln -s /etc/nginx/sites-available/companionai /etc/nginx/sites-enabled/
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
+`proxy_buffering off` and `gzip off` are the load-bearing directives. With buffering on, Nginx reads
+the entire response before forwarding a byte, which converts a word-by-word stream into one lump
+arriving at the end.
+
+## 6. DNS and certificate
+
+```bash
+# A record for companionai.runningcode.dev -> the X1's public IP, then:
+sudo certbot --nginx -d companionai.runningcode.dev
+```
+
+## 7. Full path verification
+
+```bash
+# unauthenticated must be rejected (curl sends Accept: */*, not text/html, so this
+# takes AuthFilter's API path and must return 401)
+curl -sS -o /dev/null -w '%{http_code}\n' https://companionai.runningcode.dev/api/stats
+
+# authenticated streaming through Nginx: watch it arrive incrementally.
+# AuthFilter reads the "Authorization" header and requires a "Bearer " prefix;
+# a browser will instead hold the session cookie set by the login page.
+TOKEN=$(sudo grep COMPANIONAI_AUTH_TOKEN /etc/companionai/companionai.env | cut -d= -f2)
+curl -sSN -X POST https://companionai.runningcode.dev/api/chat/stream \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"message":"In exactly three short sentences, explain what a database index is."}'
+```
+
+Reproduce the measured thresholds from `script/e2e-fastflowlm.sh` through the public endpoint: at
+least 5 delta events, at least 300 ms from first to last, and at least 80 ms worst-case gap. A
+buffered response lands within a few milliseconds and fails both.
+
+Confirm the runtime stayed private from an external host:
+
+```bash
+curl -sS --max-time 5 http://<X1-PUBLIC-IP>:52625/v1/models    # must time out
+```
+
+## Rollback
+
+```bash
+sudo systemctl disable --now companionai.service
+sudo systemctl disable --now fastflowlm.service
+sudo rm /etc/nginx/sites-enabled/companionai && sudo systemctl reload nginx
+```
+
+Removing the units and revoking the certificate leaves no trace. `/var/lib/companionai` is
+deliberately not touched.

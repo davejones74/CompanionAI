@@ -1,0 +1,81 @@
+[Unit]
+Description=CompanionAI chat companion (Tomcat)
+After=network-online.target fastflowlm.service
+Wants=network-online.target fastflowlm.service
+
+# Deliberately After= but NOT Requires=.
+#
+# Ordering is what the deployment plan asked for, and After= provides it. Requires=
+# would additionally couple lifetimes: stopping fastflowlm.service would stop
+# CompanionAI too. That is worse than it sounds, because ModelServlet is designed to
+# survive a dead provider -- it returns a tagged ChatRules reply with offline=true
+# rather than failing the request. Coupling the lifetimes would take the whole UI
+# down instead of degrading it, and would put CompanionAI into a restart loop while
+# the NPU runtime was being repaired.
+#
+# Swap in Requires= if you would rather have no UI at all than a UI that cannot
+# answer. That is a product decision, not a technical one.
+
+[Service]
+Type=simple
+User=companionai
+Group=companionai
+WorkingDirectory=/var/lib/companionai
+
+# Read by systemd as root BEFORE privileges are dropped, so this file can and
+# should be root:root 0600. The service user does not need to read it.
+#
+# The auth token is supplied here as COMPANIONAI_AUTH_TOKEN and NOT through
+# COMPANION_AI_OPTS: -D arguments are world-readable in `ps -ef`.
+EnvironmentFile=/etc/companionai/companionai.env
+
+# Anything non-secret that genuinely must be a system property goes here.
+Environment=CAMPANION_AI_OPTS=-Dfile.encoding=UTF-8
+
+ExecStart=/opt/companionai/bin/CompanionAI
+
+Restart=on-failure
+RestartSec=10
+TimeoutStartSec=180
+TimeoutStopSec=45
+
+# Tomcat's default connection handling wants far more than the systemd default of
+# 1024 descriptors once keep-alive and SSE streams are in play.
+LimitNOFILE=65536
+
+# --- Stage 1: low-risk hardening -------------------------------------------------
+NoNewPrivileges=yes
+PrivateTmp=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+# --- Phase 2: verify each before enabling -----------------------------------------
+#
+# ProtectSystem=strict makes the entire filesystem read-only except /dev, /proc,
+# /sys, /run and /tmp. ReadWritePaths then re-opens only the data directory.
+# If startup fails with a permission error, drop to ProtectSystem=full and add
+# individual ReadWritePaths for whatever it named in the log.
+# ProtectSystem=strict
+# ReadWritePaths=/var/lib/companionai
+# ProtectHome=yes
+# ProtectKernelTunables=yes
+# ProtectKernelModules=yes
+# ProtectControlGroups=yes
+# RestrictNamespaces=yes
+# RestrictRealtime=yes
+# SystemCallArchitectures=native
+# RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+#
+# The model connection is to 127.0.0.1:52625, so this would in principle confine
+# CompanionAI to loopback too:
+#   IPAddressDeny=any
+#   IPAddressAllow=localhost
+#
+# It is commented out on purpose. Unlike FastFlowLM, CompanionAI's retrieval
+# providers (weather, web search, sports) make real outbound HTTPS calls. The E2E
+# run recorded liveAttempts=0 because no provider is configured yet, so enabling
+# this now would look correct and then silently break live data the first time a
+# key is added. Enable it only if CompanionAI is deliberately kept offline-only.
+
+[Install]
+WantedBy=multi-user.target

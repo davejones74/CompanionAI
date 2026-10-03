@@ -59,7 +59,8 @@ public class ModelServlet extends HttpServlet {
     private final int maxHistoryMessages = Integer.getInteger("campanionai.historyMessages", 40);
     private final int maxUrlsPerMessage = Integer.getInteger("campanionai.maxUrlsPerMessage", 1);
     private final long maxFetchBytes = Long.getLong("campanionai.maxFetchBytes", 2L * 1024 * 1024);
-    private final boolean allowPrivateFetch = Boolean.getBoolean("campanionai.allowPrivateFetch");
+    private final boolean allowPrivateFetch = Config.bool(
+            "campanionai.allowPrivateFetch", "COMPANIONAI_ALLOW_PRIVATE_FETCH", false);
     private final boolean liveEnabled = System.getProperty("campanionai.live.enabled", "true").equalsIgnoreCase("true");
     private final boolean liveLlmMode = System.getProperty("campanionai.live.intent", "llm").equalsIgnoreCase("llm");
     private final String searchApiKey = System.getProperty("campanionai.searchApiKey", "");
@@ -100,7 +101,7 @@ public class ModelServlet extends HttpServlet {
     @Override
     public void init() {
         try {
-            String base = System.getProperty("campanionai.dataDir",
+            String base = Config.string("campanionai.dataDir", "COMPANIONAI_DATA_DIR",
                     System.getProperty("user.dir") + File.separator + "data");
             dataDir = Path.of(base).toAbsolutePath();
             Files.createDirectories(dataDir);
