@@ -453,6 +453,9 @@ public class ModelServlet extends HttpServlet {
             if (persisted.isEmpty()) {
                 return buildMessagesFrom(globalHistory, system, input, historyTokens, maxHistoryMessages);
             }
+            if (persisted.size() > 20) {
+                persisted = persisted.subList(persisted.size() - 20, persisted.size());
+            }
             java.util.List<LlmMessage> out = new java.util.ArrayList<>();
             out.add(new LlmMessage("system", system));
             for (ChatMessage m : persisted) {
@@ -565,7 +568,9 @@ public class ModelServlet extends HttpServlet {
             stats.addOutputTokens(estimateTokens(reply));
             stats.recordJsonReply();
             recordLatency(t0, estimateTokens(reply));
-            appendHistory(input, reply);
+            if (chatId == null || chatId.isBlank()) {
+                appendHistory(input, reply);
+            }
             return new ChatResult(reply, false);
         } catch (LlmException e) {
             stats.recordOffline();
@@ -676,7 +681,9 @@ public class ModelServlet extends HttpServlet {
             } catch (IOException persistErr) {
                 LOG.debug("Chat persist failed: {}", persistErr.getMessage());
             }
-            appendHistory(input, reply);
+            if (chatId == null || chatId.isBlank()) {
+                appendHistory(input, reply);
+            }
             stats.addOutputTokens(estimateTokens(reply));
             stats.recordStreamed();
             recordLatency(t0, estimateTokens(reply));
@@ -699,6 +706,13 @@ public class ModelServlet extends HttpServlet {
         }
         ToolExecutor te = toolExecutorRef.get();
         if (te == null) {
+            return messages;
+        }
+        String last = messages.isEmpty() ? "" : messages.get(messages.size() - 1).content().toLowerCase(java.util.Locale.ROOT);
+        if (!(last.contains("markdown") || last.contains("csv") || last.contains(".json") || last.contains("json file")
+                || last.contains("file") || last.contains("document") || last.contains("download")
+                || last.contains("spreadsheet") || last.contains("text file")                 || last.contains(".md")
+                || last.contains(".txt") || last.contains("create a") || last.contains("save as"))) {
             return messages;
         }
         try {
@@ -1160,7 +1174,34 @@ header .badge {
 .chat-item .title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
 .chat-item .acts button { border: none; background: transparent; cursor: pointer; color: var(--muted); padding: 0 3px; font-size: 12.5px; }
 .chat-item .acts button:hover { color: var(--primary-dark); }
-.main-col { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.main-col { flex: 1; display: flex; flex-direction: column; min-width: 0; position: relative; }
+#collapse-btn, #expand-btn {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  border-radius: 6px;
+  cursor: pointer;
+  padding: 4px 10px;
+  font-size: 14px;
+  color: var(--muted);
+}
+#expand-btn { position: absolute; top: 8px; left: 8px; z-index: 6; display: none; }
+body.sidebar-collapsed #sidebar { display: none; }
+body.sidebar-collapsed #expand-btn { display: block; }
+@media (max-width: 700px) {
+  #sidebar {
+    position: fixed;
+    left: 0; top: 0; bottom: 0;
+    width: 78vw; max-width: 280px;
+    z-index: 20;
+    box-shadow: 2px 0 12px rgba(0,0,0,.25);
+  }
+  body.sidebar-collapsed #sidebar { display: none; }
+  .bubble { max-width: 92% !important; }
+  header h1 { font-size: 16px; }
+  header .stats { display: none; }
+  #meta-bar { font-size: 11.5px; gap: 8px; flex-wrap: wrap; }
+  .empty-hint { font-size: 13px; margin-top: 4vh; }
+}
 #meta-bar { display: flex; gap: 14px; align-items: center; padding: 4px 16px; font-size: 12.5px; color: var(--muted); background: var(--panel); border-top: 1px solid var(--border); }
 #context-bar-wrap { flex: 0 0 120px; height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; }
 #context-bar-wrap > div { height: 100%; width: 0%; background: var(--primary); }
@@ -1184,8 +1225,8 @@ main {
 .msg.assistant { justify-content: flex-start; position: relative; }
 .copy-btn {
   position: absolute;
-  top: 4px;
-  right: 4px;
+  top: 6px;
+  right: 6px;
   border: 1px solid var(--border);
   background: var(--panel);
   color: var(--muted);
@@ -1195,6 +1236,8 @@ main {
   line-height: 0;
   opacity: .7;
 }
+.bubble { position: relative; }
+.msg.assistant .bubble { padding-right: 30px; }
 .copy-btn:hover { opacity: 1; color: var(--primary-dark); }
 .copy-btn.copied { color: #2e7d32; }
 .bubble {
@@ -1451,11 +1494,13 @@ details.stats .stat-grid b { color: var(--text); font-weight: 600; }
 
 <div class="app-body">
 <aside id="sidebar">
+  <button id="collapse-btn" title="Collapse chat list">&laquo;</button>
   <button id="new-chat-btn">+ New Chat</button>
   <h3>Chats</h3>
   <div id="chat-list"></div>
 </aside>
 <div class="main-col">
+<button id="expand-btn" title="Show chat list">&raquo;</button>
 <main>
   <div class="chat" id="chat-log">
     <div class="empty-hint">Ask a question, paste a URL and I'll fetch and read it, or just say hello. Your conversation will stay here so you can scroll back through it.</div>
@@ -1465,6 +1510,7 @@ details.stats .stat-grid b { color: var(--text); font-weight: 600; }
 <div id="sourcesSection" style="display:none"><b>Sources</b><div id="sourcesList"></div></div>
 <div id="filesSection" style="display:none"><b>Files</b><div id="filesList"></div></div>
 <div id="meta-bar">
+  <span id="chat-title-label">Chat: <b id="chatTitle">-</b></span>
   <span>Context: <b id="contextPct">-</b> (<span id="contextText">0 / 0</span>)</span>
   <div id="context-bar-wrap"><div id="contextBar"></div></div>
 </div>
@@ -1574,17 +1620,17 @@ function mdRow(l) {
   return l.trim().replace(/^\\|/, '').replace(/\\|$/, '').split('|').map(function (c) { return c.trim(); });
 }
 const MATH_SYMS = {
-  alpha:'ÃƒÅ½Ã‚Â±', beta:'ÃƒÅ½Ã‚Â²', gamma:'ÃƒÅ½Ã‚Â³', Gamma:'ÃƒÅ½Ã¢â‚¬Å“', delta:'ÃƒÅ½Ã‚Â´', Delta:'ÃƒÅ½Ã¢â‚¬Â', epsilon:'ÃƒÅ½Ã‚Âµ', varepsilon:'ÃƒÅ½Ã‚Âµ',
-  zeta:'ÃƒÅ½Ã‚Â¶', eta:'ÃƒÅ½Ã‚Â·', theta:'ÃƒÅ½Ã‚Â¸', Theta:'ÃƒÅ½Ã‹Å“', lambda:'ÃƒÅ½Ã‚Â»', Lambda:'ÃƒÅ½Ã¢â‚¬Âº', mu:'ÃƒÅ½Ã‚Â¼', nu:'ÃƒÅ½Ã‚Â½', xi:'ÃƒÅ½Ã‚Â¾',
-  pi:'ÃƒÂÃ¢â€šÂ¬', Pi:'ÃƒÅ½Ã‚Â ', rho:'ÃƒÂÃ‚Â', sigma:'ÃƒÂÃ†â€™', Sigma:'ÃƒÅ½Ã‚Â£', tau:'ÃƒÂÃ¢â‚¬Å¾', upsilon:'ÃƒÂÃ¢â‚¬Â¦', phi:'ÃƒÂÃ¢â‚¬Â ', Phi:'ÃƒÅ½Ã‚Â¦',
-  psi:'ÃƒÂÃ‹â€ ', Psi:'ÃƒÅ½Ã‚Â¨', chi:'ÃƒÂÃ¢â‚¬Â¡', omega:'ÃƒÂÃ¢â‚¬Â°', Omega:'ÃƒÅ½Ã‚Â©',
-  partial:'ÃƒÂ¢Ã‹â€ Ã¢â‚¬Å¡', nabla:'ÃƒÂ¢Ã‹â€ Ã¢â‚¬Â¡', sum:'ÃƒÂ¢Ã‹â€ Ã¢â‚¬Ëœ', prod:'ÃƒÂ¢Ã‹â€ Ã‚Â', int:'ÃƒÂ¢Ã‹â€ Ã‚Â«', infty:'ÃƒÂ¢Ã‹â€ Ã…Â¾',
-  odot:'ÃƒÂ¢Ã…Â Ã¢â€žÂ¢', otimes:'ÃƒÂ¢Ã…Â Ã¢â‚¬â€', oplus:'ÃƒÂ¢Ã…Â Ã¢â‚¬Â¢', cdot:'Ãƒâ€šÃ‚Â·', times:'ÃƒÆ’Ã¢â‚¬â€', pm:'Ãƒâ€šÃ‚Â±', mp:'ÃƒÂ¢Ã‹â€ Ã¢â‚¬Å“',
-  to:'ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢', rightarrow:'ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢', leftarrow:'ÃƒÂ¢Ã¢â‚¬Â Ã‚Â', rightleftharpoons:'ÃƒÂ¢Ã¢â‚¬Â¡Ã…â€™',
-  in:'ÃƒÂ¢Ã‹â€ Ã‹â€ ', notin:'ÃƒÂ¢Ã‹â€ Ã¢â‚¬Â°', subset:'ÃƒÂ¢Ã…Â Ã¢â‚¬Å¡', subseteq:'ÃƒÂ¢Ã…Â Ã¢â‚¬Â ', supset:'ÃƒÂ¢Ã…Â Ã†â€™', supseteq:'ÃƒÂ¢Ã…Â Ã¢â‚¬Â¡',
-  cup:'ÃƒÂ¢Ã‹â€ Ã‚Âª', cap:'ÃƒÂ¢Ã‹â€ Ã‚Â©', approx:'ÃƒÂ¢Ã¢â‚¬Â°Ã‹â€ ', propto:'ÃƒÂ¢Ã‹â€ Ã‚Â', equiv:'ÃƒÂ¢Ã¢â‚¬Â°Ã‚Â¡', sim:'ÃƒÂ¢Ã‹â€ Ã‚Â¼', ne:'ÃƒÂ¢Ã¢â‚¬Â°Ã‚Â ', le:'ÃƒÂ¢Ã¢â‚¬Â°Ã‚Â¤', ge:'ÃƒÂ¢Ã¢â‚¬Â°Ã‚Â¥',
-  ldots:'ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦', cdots:'ÃƒÂ¢Ã¢â‚¬Â¹Ã‚Â¯', prime:'ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â²', ell:'ÃƒÂ¢Ã¢â‚¬Å¾Ã¢â‚¬Å“', top:'ÃƒÂ¢Ã…Â Ã‚Â¤', bot:'ÃƒÂ¢Ã…Â Ã‚Â¥', neg:'Ãƒâ€šÃ‚Â¬', and:'ÃƒÂ¢Ã‹â€ Ã‚Â§', or:'ÃƒÂ¢Ã‹â€ Ã‚Â¨',
-  nonumber:'', quad:' ', qquad:'  ', circ:'Ãƒâ€šÃ‚Â°'
+  alpha:'ÃƒÆ’Ã…Â½Ãƒâ€šÃ‚Â±', beta:'ÃƒÆ’Ã…Â½Ãƒâ€šÃ‚Â²', gamma:'ÃƒÆ’Ã…Â½Ãƒâ€šÃ‚Â³', Gamma:'ÃƒÆ’Ã…Â½ÃƒÂ¢Ã¢â€šÂ¬Ã…â€œ', delta:'ÃƒÆ’Ã…Â½Ãƒâ€šÃ‚Â´', Delta:'ÃƒÆ’Ã…Â½ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â', epsilon:'ÃƒÆ’Ã…Â½Ãƒâ€šÃ‚Âµ', varepsilon:'ÃƒÆ’Ã…Â½Ãƒâ€šÃ‚Âµ',
+  zeta:'ÃƒÆ’Ã…Â½Ãƒâ€šÃ‚Â¶', eta:'ÃƒÆ’Ã…Â½Ãƒâ€šÃ‚Â·', theta:'ÃƒÆ’Ã…Â½Ãƒâ€šÃ‚Â¸', Theta:'ÃƒÆ’Ã…Â½Ãƒâ€¹Ã…â€œ', lambda:'ÃƒÆ’Ã…Â½Ãƒâ€šÃ‚Â»', Lambda:'ÃƒÆ’Ã…Â½ÃƒÂ¢Ã¢â€šÂ¬Ã‚Âº', mu:'ÃƒÆ’Ã…Â½Ãƒâ€šÃ‚Â¼', nu:'ÃƒÆ’Ã…Â½Ãƒâ€šÃ‚Â½', xi:'ÃƒÆ’Ã…Â½Ãƒâ€šÃ‚Â¾',
+  pi:'ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬', Pi:'ÃƒÆ’Ã…Â½Ãƒâ€šÃ‚Â ', rho:'ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â', sigma:'ÃƒÆ’Ã‚ÂÃƒâ€ Ã¢â‚¬â„¢', Sigma:'ÃƒÆ’Ã…Â½Ãƒâ€šÃ‚Â£', tau:'ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾', upsilon:'ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦', phi:'ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ', Phi:'ÃƒÆ’Ã…Â½Ãƒâ€šÃ‚Â¦',
+  psi:'ÃƒÆ’Ã‚ÂÃƒâ€¹Ã¢â‚¬Â ', Psi:'ÃƒÆ’Ã…Â½Ãƒâ€šÃ‚Â¨', chi:'ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¡', omega:'ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã‚Â°', Omega:'ÃƒÆ’Ã…Â½Ãƒâ€šÃ‚Â©',
+  partial:'ÃƒÆ’Ã‚Â¢Ãƒâ€¹Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡', nabla:'ÃƒÆ’Ã‚Â¢Ãƒâ€¹Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¡', sum:'ÃƒÆ’Ã‚Â¢Ãƒâ€¹Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã‹Å“', prod:'ÃƒÆ’Ã‚Â¢Ãƒâ€¹Ã¢â‚¬Â Ãƒâ€šÃ‚Â', int:'ÃƒÆ’Ã‚Â¢Ãƒâ€¹Ã¢â‚¬Â Ãƒâ€šÃ‚Â«', infty:'ÃƒÆ’Ã‚Â¢Ãƒâ€¹Ã¢â‚¬Â Ãƒâ€¦Ã‚Â¾',
+  odot:'ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã‚Â ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢', otimes:'ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â', oplus:'ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢', cdot:'ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â·', times:'ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â', pm:'ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â±', mp:'ÃƒÆ’Ã‚Â¢Ãƒâ€¹Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã…â€œ',
+  to:'ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢', rightarrow:'ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢', leftarrow:'ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â Ãƒâ€šÃ‚Â', rightleftharpoons:'ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¡Ãƒâ€¦Ã¢â‚¬â„¢',
+  in:'ÃƒÆ’Ã‚Â¢Ãƒâ€¹Ã¢â‚¬Â Ãƒâ€¹Ã¢â‚¬Â ', notin:'ÃƒÆ’Ã‚Â¢Ãƒâ€¹Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â°', subset:'ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡', subseteq:'ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ', supset:'ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã‚Â Ãƒâ€ Ã¢â‚¬â„¢', supseteq:'ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¡',
+  cup:'ÃƒÆ’Ã‚Â¢Ãƒâ€¹Ã¢â‚¬Â Ãƒâ€šÃ‚Âª', cap:'ÃƒÆ’Ã‚Â¢Ãƒâ€¹Ã¢â‚¬Â Ãƒâ€šÃ‚Â©', approx:'ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â°Ãƒâ€¹Ã¢â‚¬Â ', propto:'ÃƒÆ’Ã‚Â¢Ãƒâ€¹Ã¢â‚¬Â Ãƒâ€šÃ‚Â', equiv:'ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â°Ãƒâ€šÃ‚Â¡', sim:'ÃƒÆ’Ã‚Â¢Ãƒâ€¹Ã¢â‚¬Â Ãƒâ€šÃ‚Â¼', ne:'ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â°Ãƒâ€šÃ‚Â ', le:'ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â°Ãƒâ€šÃ‚Â¤', ge:'ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â°Ãƒâ€šÃ‚Â¥',
+  ldots:'ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â¦', cdots:'ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¹Ãƒâ€šÃ‚Â¯', prime:'ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â²', ell:'ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾ÃƒÂ¢Ã¢â€šÂ¬Ã…â€œ', top:'ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã‚Â Ãƒâ€šÃ‚Â¤', bot:'ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã‚Â Ãƒâ€šÃ‚Â¥', neg:'ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬', and:'ÃƒÆ’Ã‚Â¢Ãƒâ€¹Ã¢â‚¬Â Ãƒâ€šÃ‚Â§', or:'ÃƒÆ’Ã‚Â¢Ãƒâ€¹Ã¢â‚¬Â Ãƒâ€šÃ‚Â¨',
+  nonumber:'', quad:' ', qquad:'  ', circ:'ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â°'
 };
 function mathReadGroup(s, i) {
   if (s.charAt(i) !== '{') return null;
@@ -1623,8 +1669,8 @@ function renderMath(s) {
       }
       if (cmd === 'sqrt') {
         const g = mathReadGroup(s, k);
-        if (g) { out += 'ÃƒÂ¢Ã‹â€ Ã…Â¡(' + renderMath(g.inner) + ')'; i = g.end; continue; }
-        out += 'ÃƒÂ¢Ã‹â€ Ã…Â¡'; i = k; continue;
+        if (g) { out += 'ÃƒÆ’Ã‚Â¢Ãƒâ€¹Ã¢â‚¬Â Ãƒâ€¦Ã‚Â¡(' + renderMath(g.inner) + ')'; i = g.end; continue; }
+        out += 'ÃƒÆ’Ã‚Â¢Ãƒâ€¹Ã¢â‚¬Â Ãƒâ€¦Ã‚Â¡'; i = k; continue;
       }
       if (cmd === 'left' || cmd === 'right' || cmd === 'big' || cmd === 'Big' ||
           cmd === 'bigl' || cmd === 'bigr' || cmd === 'biggl' || cmd === 'biggr') {
@@ -1840,8 +1886,7 @@ function mdRender(src) {
     inner.className = 'bubble';
     if (role === 'assistant') {
       inner.innerHTML = mdRender(text);
-      wrap.style.position = 'relative';
-      addCopyButton(wrap, text);
+      addCopyButton(inner, text);
     } else {
       inner.textContent = text;
     }
@@ -1911,7 +1956,9 @@ function renderChats(chats) {
   const list = document.getElementById('chat-list');
   if (!list) return;
   list.innerHTML = '';
+  let activeTitle = '';
   (chats || []).forEach(c => {
+    if (c.id === currentChatId) activeTitle = c.title || 'New chat';
     const div = document.createElement('div');
     div.className = 'chat-item' + (c.id === currentChatId ? ' active' : '');
     const t = document.createElement('span');
@@ -1932,6 +1979,8 @@ function renderChats(chats) {
     div.appendChild(acts);
     list.appendChild(div);
   });
+  const titleEl = document.getElementById('chatTitle');
+  if (titleEl) titleEl.textContent = activeTitle || (currentChatId ? 'New chat' : '-');
 }
 function selectChat(id) {
   currentChatId = id;
@@ -1983,6 +2032,19 @@ function resetMeta() {
   const fl = document.getElementById('filesList'); if (fl) fl.innerHTML = '';
 }
 document.getElementById('new-chat-btn').addEventListener('click', newChat);
+function setSidebarCollapsed(collapsed) {
+  document.body.classList.toggle('sidebar-collapsed', collapsed);
+  try { localStorage.setItem('sidebarCollapsed', collapsed ? '1' : '0'); } catch (e) {}
+}
+document.getElementById('collapse-btn').addEventListener('click', () => setSidebarCollapsed(true));
+document.getElementById('expand-btn').addEventListener('click', () => setSidebarCollapsed(false));
+let storedCollapsed = null;
+try { storedCollapsed = localStorage.getItem('sidebarCollapsed'); } catch (e) {}
+if (storedCollapsed != null) {
+  setSidebarCollapsed(storedCollapsed === '1');
+} else if (window.innerWidth <= 700) {
+  setSidebarCollapsed(true);
+}
 loadChats();
 async function send() {
   const text = input.value.trim();
@@ -2066,7 +2128,7 @@ async function send() {
         }
       }
     }
-    if (bubble) addCopyButton(bubble, acc);
+    if (bubble && inner) addCopyButton(inner, acc);
   } catch (e) {
     if (thinkEl) thinkEl.remove();
     if (bubble) bubble.remove();
