@@ -16,6 +16,7 @@ public final class UsageStats {
     private final AtomicLong outputTokens = new AtomicLong();
     private final AtomicLong liveAttempts = new AtomicLong();
     private final AtomicLong liveFailures = new AtomicLong();
+    private final AtomicLong cloudFallbacks = new AtomicLong();
 
     private long latencySumMs;
     private long latencyCount;
@@ -63,6 +64,17 @@ public final class UsageStats {
         liveFailures.incrementAndGet();
     }
 
+    /**
+     * Records a reply that was produced by the cloud fallback because the local model failed.
+     *
+     * <p>Counted separately from {@link #recordOffline()} because the two answer different
+     * questions: an offline reply says nothing left the machine, and a cloud reply says something
+     * did. An operator reading the stats needs to be able to tell those apart at a glance.
+     */
+    public void recordCloudFallback() {
+        cloudFallbacks.incrementAndGet();
+    }
+
     public void recordLatency(long elapsedMs, long outTokens) {
         synchronized (latencyLock) {
             latencySumMs += elapsedMs;
@@ -92,6 +104,7 @@ public final class UsageStats {
                         .put("outputTokens", outputTokens.get())
                         .put("liveAttempts", liveAttempts.get())
                         .put("liveFailures", liveFailures.get())
+                        .put("cloudFallbacks", cloudFallbacks.get())
                         .put("avgLatencyMs", latencyCount == 0 ? 0 : latencySumMs / latencyCount)
                         .put("lastLatencyMs", lastLatencyMs)
                         .put("lastOutputTokens", lastOutputTokens));

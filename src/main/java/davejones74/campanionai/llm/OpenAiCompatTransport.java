@@ -42,14 +42,26 @@ public final class OpenAiCompatTransport {
 
     private final String baseUrl;
     private final String providerLabel;
+    /**
+     * Bearer credential sent on every request, or {@code null} for a runtime that needs none.
+     *
+     * <p>Local runtimes are unauthenticated. A hosted endpoint is not, and a missing
+     * {@code Authorization} header is the difference between a 401 and a working fallback.
+     */
+    private final String bearerToken;
     private final ObjectMapper mapper = new ObjectMapper();
     private final HttpClient http = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(CONNECT_TIMEOUT_SECONDS))
             .build();
 
     OpenAiCompatTransport(String baseUrl, String providerLabel) {
+        this(baseUrl, providerLabel, null);
+    }
+
+    OpenAiCompatTransport(String baseUrl, String providerLabel, String bearerToken) {
         this.baseUrl = stripTrailingSlash(baseUrl);
         this.providerLabel = providerLabel;
+        this.bearerToken = bearerToken == null || bearerToken.isBlank() ? null : bearerToken.trim();
     }
 
     String baseUrl() {
@@ -118,12 +130,13 @@ public final class OpenAiCompatTransport {
     /** GETs a path and returns the parsed JSON body. */
     JsonNode getJson(String path) throws LlmException {
         try {
-            HttpRequest request = HttpRequest.newBuilder()
+            HttpRequest.Builder builder = HttpRequest.newBuilder()
                     .uri(uri(path))
                     .header("Accept", "application/json")
                     .timeout(Duration.ofSeconds(COMPLETE_TIMEOUT_SECONDS))
-                    .GET()
-                    .build();
+                    .GET();
+            authorize(builder);
+            HttpRequest request = builder.build();
             HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString());
             if (response.statusCode() != 200) {
                 throw new LlmException(providerLabel + " returned HTTP "
@@ -140,13 +153,20 @@ public final class OpenAiCompatTransport {
     }
 
     private HttpRequest post(String path, String body, int timeoutSeconds) {
-        return HttpRequest.newBuilder()
+        HttpRequest.Builder builder = HttpRequest.newBuilder()
                 .uri(uri(path))
                 .header("Content-Type", "application/json")
                 .header("Accept", "text/event-stream, application/json")
                 .timeout(Duration.ofSeconds(timeoutSeconds))
-                .POST(HttpRequest.BodyPublishers.ofString(body))
-                .build();
+                .POST(HttpRequest.BodyPublishers.ofString(body));
+        authorize(builder);
+        return builder.build();
+    }
+
+    private void authorize(HttpRequest.Builder builder) {
+        if (bearerToken != null) {
+            builder.header("Authorization", "Bearer " + bearerToken);
+        }
     }
 
     private URI uri(String path) {
@@ -185,6 +205,7 @@ public final class OpenAiCompatTransport {
                 if (root.path("done").asBoolean(false)) {
                     continue;
                 }
+                deltaThinking(root, handler);
                 String delta = deltaContent(root);
                 if (!delta.isEmpty()) {
                     handler.onDelta(delta);
@@ -217,6 +238,27 @@ public final class OpenAiCompatTransport {
             return message.asText("");
         }
         return "";
+    }
+
+    private static void deltaThinking(JsonNode root, LlmProvider.ChunkHandler handler) {
+        JsonNode choices = root.path("choices");
+        if (!choices.isArray() || choices.isEmpty()) {
+            return;
+        }
+        JsonNode first = choices.get(0);
+        JsonNode delta = first.path("delta");
+        if (delta.isMissingNode() || delta.isNull()) {
+            return;
+        }
+        String[] keys = { "reasoning_content", "reasoning", "thinking", "thought" };
+        for (String k : keys) {
+            if (delta.has(k) && !delta.get(k).isNull()) {
+                String t = delta.get(k).asText("");
+                if (!t.isEmpty()) {
+                    handler.onThinking(t);
+                }
+            }
+        }
     }
 
     private void throwIfError(JsonNode root) throws LlmException {

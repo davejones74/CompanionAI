@@ -61,5 +61,13 @@ public interface LlmProvider {
     @FunctionalInterface
     interface ChunkHandler {
         void onDelta(String delta);
+
+        /**
+         * Called when a reasoning/thinking delta arrives. The default implementation forwards to
+         * {@link #onDelta(String)} so existing providers and callers continue to work unchanged.
+         */
+        default void onThinking(String delta) {
+            // no-op by default
+        }
     }
 }

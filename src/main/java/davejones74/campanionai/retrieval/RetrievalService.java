@@ -116,7 +116,7 @@ public final class RetrievalService {
             RetrievalResult result = provider.retrieve(request);
             if (kind == RetrievalKind.WEB_SEARCH) {
                 reportProgress(listener, result, profile);
-                return new LiveContext(formatWeb(result, input), true, false, toSources(result));
+                return new LiveContext(formatWeb(result, input), true, false, toSources(result), profile);
             }
             if (result.items().isEmpty()) {
                 return new LiveContext(notice("The search returned no results."), true, false, List.of());
@@ -137,13 +137,18 @@ public final class RetrievalService {
                 try {
                     RetrievalResult result = fallback.retrieve(retry);
                     if (!result.items().isEmpty()) {
-                        return new LiveContext(formatWeb(result, input), true, false, toSources(result));
+                        // The retry is a single lookup by construction, so it carries the
+                        // lookup profile rather than the profile of the request that failed.
+                        return new LiveContext(formatWeb(result, input), true, false, toSources(result),
+                                WebSearchProfile.LOOKUP);
                     }
                 } catch (RetrievalException retryError) {
                     LOG.warn("Fallback {} failed : {}", fallbackKind, String.valueOf(retryError.getMessage()));
                 }
             }
-            return new LiveContext(notice(e.userFacingMessage()), true, true, List.of());
+            // The profile travels with the context even when the lookup failed, so that a
+            // research request is still recognisable as one by whoever handles the failure.
+            return new LiveContext(notice(e.userFacingMessage()), true, true, List.of(), profile);
         }
     }
 

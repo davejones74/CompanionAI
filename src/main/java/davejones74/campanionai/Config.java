@@ -65,6 +65,24 @@ public final class Config {
         return fallback;
     }
 
+    /**
+     * Decimal lookup accepting only a parsable number.
+     *
+     * <p>Any other value, including a bare word, is {@code fallback}. A temperature that silently
+     * became 1.0 because of a typo would change every reply in a way nothing logs.
+     */
+    public static double decimal(String key, String envKey, double fallback) {
+        String raw = string(key, envKey, null);
+        if (raw == null) {
+            return fallback;
+        }
+        try {
+            return Double.parseDouble(raw);
+        } catch (NumberFormatException e) {
+            return fallback;
+        }
+    }
+
     private static boolean isBlank(String value) {
         return value == null || value.isBlank();
     }
