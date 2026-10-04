@@ -64,14 +64,23 @@ public class ModelServlet extends HttpServlet {
     private LlmProvider llm;
     private Path dataDir;
 
-    private final int maxChunksPerDoc = Integer.getInteger("campanionai.maxDocs", 3);
-    private final int chunkTokens = Integer.getInteger("campanionai.chunkTokens", 1500);
-    private final int chunkOverlap = Integer.getInteger("campanionai.chunkOverlap", 200);
-    private final int maxContextTokens = Integer.getInteger("campanionai.maxContextTokens", 20000);
-    private final int historyTokens = Integer.getInteger("campanionai.historyTokens", 8000);
-    private final int maxHistoryMessages = Integer.getInteger("campanionai.historyMessages", 40);
-    private final int maxUrlsPerMessage = Integer.getInteger("campanionai.maxUrlsPerMessage", 1);
-    private final long maxFetchBytes = Long.getLong("campanionai.maxFetchBytes", 2L * 1024 * 1024);
+    private final int maxChunksPerDoc = Config.integer(
+            "campanionai.maxChunksPerDoc", "COMPANIONAI_MAX_CHUNKS_PER_DOC", 3);
+    private final int chunkTokens = Config.integer(
+            "campanionai.chunkTokens", "COMPANIONAI_CHUNK_TOKENS", 1500);
+    private final int chunkOverlap = Config.integer(
+            "campanionai.chunkOverlap", "COMPANIONAI_CHUNK_OVERLAP", 200);
+    private final int maxContextTokens = Config.integer(
+            "campanionai.maxContextTokens", "COMPANIONAI_MAX_CONTEXT_TOKENS", 12000);
+    private final int historyTokens = Config.integer(
+            "campanionai.historyTokens", "COMPANIONAI_HISTORY_TOKENS", 4000);
+    private final int maxHistoryMessages = Config.integer(
+            "campanionai.historyMessages", "COMPANIONAI_HISTORY_MESSAGES", 20);
+    private final int maxUrlsPerMessage = Config.integer(
+            "campanionai.maxUrlsPerMessage", "COMPANIONAI_MAX_URLS_PER_MESSAGE", 1);
+    private final long maxFetchBytes = Config.longValue(
+            "campanionai.maxFetchBytes", "COMPANIONAI_MAX_FETCH_BYTES", 2L * 1024 * 1024);
+
     private final boolean allowPrivateFetch = Config.bool(
             "campanionai.allowPrivateFetch", "COMPANIONAI_ALLOW_PRIVATE_FETCH", false);
     // Live-retrieval settings keep their original strict parse rather than Config.bool:
@@ -659,7 +668,9 @@ public class ModelServlet extends HttpServlet {
                 @Override
                 public void onThinking(String delta) {
                     try {
-                        writeEvent(out, Map.of("thought", delta));
+                        if (showThinkingDefault) {
+                            writeEvent(out, Map.of("thought", delta));
+                        }
                     } catch (IOException e) {
                         throw new StreamAbort(e);
                     }
@@ -762,7 +773,14 @@ public class ModelServlet extends HttpServlet {
             ContextUsage cu = computeContextUsage(system, messages.subList(1, Math.max(0, messages.size() - 1)),
                     ctx, live, input);
             List<Source> sources = collectSources(urls, lc);
-            stats.addInputTokens(estimateTokens(system) + estimateTokens(input));
+            long historySentNonStream = 0;
+            for (int i = 1; i < messages.size() - 1; i++) {
+                historySentNonStream += estimateTokens(messages.get(i).content());
+            }
+            stats.addInputTokens(cu.system() + historySentNonStream + cu.input());
+            LOG.info("[CONTEXT] System={} History={} Knowledge={} Live={} Input={} Total={} (msgCount={})",
+                    cu.system(), historySentNonStream, cu.knowledge(), cu.live(), cu.input(),
+                    cu.system() + historySentNonStream + cu.input(), messages.size());
             java.util.List<LlmMessage> chatMessages = planFiles(messages, generatedFiles);
             String reply;
             CloudAnswer cloudAnswer = null;
@@ -851,12 +869,36 @@ return new ChatResult("I couldn't reach the language model right now: " + e.getM
             String live = lc.promptBlock();
             String system = systemPrompt(ctx, live);
             java.util.List<LlmMessage> messages = buildChatMessages(chatStoreRef.get(), history, system, input, chatId, historyTokens, maxHistoryMessages);
-            stats.addInputTokens(estimateTokens(system) + estimateTokens(input));            ContextUsage cu = computeContextUsage(system, messages.subList(1, Math.max(0, messages.size()-1)), ctx, lc.promptBlock(), input);
+            ContextUsage cu = computeContextUsage(system, messages.subList(1, Math.max(0, messages.size()-1)), ctx, lc.promptBlock(), input);
+            long historySent = 0;
+            for (int i = 1; i < messages.size() - 1; i++) {
+                historySent += estimateTokens(messages.get(i).content());
+            }
+            long totalSent = cu.system() + historySent + cu.input();
+            // Enforce global ceiling - trim history if needed
+            if (totalSent > maxContextTokens && messages.size() > 2) {
+                java.util.List<LlmMessage> trimmed = new java.util.ArrayList<>(messages);
+                while (trimmed.size() > 2 && totalSent > maxContextTokens) {
+                    trimmed.remove(1);
+                    historySent = 0;
+                    for (int i = 1; i < trimmed.size() - 1; i++) {
+                        historySent += estimateTokens(trimmed.get(i).content());
+                    }
+                    totalSent = cu.system() + historySent + cu.input();
+                }
+                messages = trimmed;
+            }
+            stats.addInputTokens(cu.system() + historySent + cu.input());
+            LOG.info("[CONTEXT] System={} History={} Knowledge={} Live={} Input={} Total={} (msgCount={})",
+                    cu.system(), historySent, cu.knowledge(), cu.live(), cu.input(),
+                    cu.system() + historySent + cu.input(), messages.size());
             java.util.List<Source> sources = collectSources(urls, lc);
             for (Source s : sources) {
                 try { writeEvent(out, java.util.Map.of("source", s)); } catch (IOException e) { throw new StreamAbort(e); }
             }
-            try { writeEvent(out, java.util.Map.of("metadata", java.util.Map.of("contextUsage", java.util.Map.of("used", cu.used(), "limit", cu.limit(), "percentage", cu.percentage())))); } catch (IOException e) { throw new StreamAbort(e); }
+            try { writeEvent(out, java.util.Map.of("metadata", java.util.Map.of("contextUsage", java.util.Map.of(
+                    "used", cu.used(), "limit", cu.limit(), "percentage", cu.percentage(),
+                    "system", cu.system(), "history", cu.history(), "knowledge", cu.knowledge(), "live", cu.live(), "input", cu.input())))); } catch (IOException e) { throw new StreamAbort(e); }
 
             java.util.List<FileRef> generatedFiles = new java.util.ArrayList<>();
             java.util.List<LlmMessage> streamMessages = planFiles(messages, generatedFiles);
@@ -882,7 +924,9 @@ return new ChatResult("I couldn't reach the language model right now: " + e.getM
                     @Override
                     public void onThinking(String delta) {
                         try {
-                            writeEvent(out, Map.of("thought", delta));
+                            if (showThinkingDefault) {
+                                writeEvent(out, Map.of("thought", delta));
+                            }
                         } catch (IOException e) {
                             throw new StreamAbort(e);
                         }
@@ -1073,21 +1117,23 @@ return new ChatResult("I couldn't reach the language model right now: " + e.getM
     }
 
     private ContextUsage computeContextUsage(String system, List<LlmMessage> historyMsgs, List<Chunk> ctx, String livePrompt, String input) {
-        long total = estimateTokens(system) + estimateTokens(input);
+        long systemTok = estimateTokens(system);
+        long inputTok = estimateTokens(input);
+        long historyTok = 0;
         if (historyMsgs != null) {
             for (LlmMessage m : historyMsgs) {
-                total += estimateTokens(m.content());
+                historyTok += estimateTokens(m.content());
             }
         }
-        if (livePrompt != null) {
-            total += estimateTokens(livePrompt);
-        }
+        long liveTok = livePrompt == null ? 0 : estimateTokens(livePrompt);
+        long knowledgeTok = 0;
         if (ctx != null) {
             for (Chunk c : ctx) {
-                total += estimateTokens(c.text());
+                knowledgeTok += estimateTokens(c.text());
             }
         }
-        return ContextUsage.of(total, maxContextTokens);
+        long total = systemTok + historyTok + inputTok;
+        return ContextUsage.of(total, maxContextTokens, systemTok, historyTok, knowledgeTok, liveTok, inputTok);
     }
 
     private int docCount() {

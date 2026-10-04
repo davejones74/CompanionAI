@@ -83,6 +83,18 @@ public final class Config {
         }
     }
 
+    public static long longValue(String key, String envKey, long fallback) {
+        String raw = string(key, envKey, null);
+        if (raw == null) {
+            return fallback;
+        }
+        try {
+            return Long.parseLong(raw);
+        } catch (NumberFormatException e) {
+            return fallback;
+        }
+    }
+
     private static boolean isBlank(String value) {
         return value == null || value.isBlank();
     }
