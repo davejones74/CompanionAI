@@ -1861,7 +1861,15 @@ if (showThinking) {
   try { showThinking.checked = (localStorage.getItem('showThinking') === '1'); } catch (e) {}
   showThinking.addEventListener('change', function() {
     try { localStorage.setItem('showThinking', showThinking.checked ? '1' : '0'); } catch (e) {}
-    if (thinkEl) thinkEl.style.display = showThinking.checked ? 'flex' : 'none';
+    if (thinkEl) {
+      if (showThinking.checked) {
+        thinkEl.style.display = 'flex';
+        thinkEl.innerHTML = '<span>thinking</span><span class="dots"><span></span><span></span><span></span></span><div class="bubble" style="margin-top:6px;background:#fafbfe;">' + mdRender(thoughtAcc) + '</div>';
+      } else {
+        thinkEl.style.display = 'flex';
+        thinkEl.innerHTML = '<span>thinking</span><span class="dots"><span></span><span></span><span></span></span>';
+      }
+    }
   });
 }
 
@@ -2392,11 +2400,6 @@ async function send() {
   addMsg('user', text);
   let thinkEl = document.createElement('div');
   thinkEl.className = 'msg assistant thinking';
-  if (showThinking && showThinking.checked) {
-    thinkEl.style.display = 'flex';
-  } else {
-    thinkEl.style.display = 'none';
-  }
   thinkEl.innerHTML = '<span>thinking</span><span class="dots"><span></span><span></span><span></span></span>';
   chatLog.appendChild(thinkEl);
   chatLog.scrollTo({ top: chatLog.scrollHeight, behavior: 'smooth' });
@@ -2469,11 +2472,11 @@ async function send() {
               thinkEl.innerHTML = '<span>thinking</span><span class="dots"><span></span><span></span><span></span></span>';
               chatLog.appendChild(thinkEl);
             }
+            thinkEl.style.display = 'flex';
             if (showThinking && showThinking.checked) {
-              thinkEl.style.display = 'flex';
-              thinkEl.innerHTML = '<span>thinking</span><div class="bubble" style="margin-top:6px;background:#fafbfe;">' + mdRender(thoughtAcc) + '</div>';
+              thinkEl.innerHTML = '<span>thinking</span><span class="dots"><span></span><span></span><span></span></span><div class="bubble" style="margin-top:6px;background:#fafbfe;">' + mdRender(thoughtAcc) + '</div>';
             } else {
-              thinkEl.style.display = 'none';
+              thinkEl.innerHTML = '<span>thinking</span><span class="dots"><span></span><span></span><span></span></span>';
             }
             chatLog.scrollTo({ top: chatLog.scrollHeight, behavior: 'smooth' });
           }
