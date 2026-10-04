@@ -1515,6 +1515,44 @@ function autoGrow() {
 }
 input.addEventListener('input', autoGrow);
 
+
+function escapeHtml(s) {
+  if (s == null) return '';
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+let currentContext = {used:0, limit:1, percentage:0};
+function updateContext(cu) {
+  if (!cu) return;
+  currentContext = cu;
+  const pct = Math.max(0, Math.min(100, Math.round((cu.percentage != null) ? cu.percentage : (cu.used*100)/Math.max(1,cu.limit))));
+  const el = document.getElementById('contextPct');
+  if (el) el.textContent = pct + '%';
+  const bar = document.getElementById('contextBar');
+  if (bar) bar.style.width = pct + '%';
+  const txt = document.getElementById('contextText');
+  if (txt) txt.textContent = (cu.used||0) + ' / ' + (cu.limit||0);
+}
+function appendSource(src) {
+  if (!src || !src.url) return;
+  const cont = document.getElementById('sourcesList');
+  if (!cont) return;
+  const div = document.createElement('div');
+  div.innerHTML = '<a href="' + src.url + '" target="_blank" rel="noopener noreferrer">?? ' + escapeHtml(src.title || src.url) + '</a>';
+  cont.appendChild(div);
+  const sec = document.getElementById('sourcesSection');
+  if (sec) sec.style.display = 'block';
+}
+function appendFile(f) {
+  if (!f || !f.url) return;
+  const cont = document.getElementById('filesList');
+  if (!cont) return;
+  const div = document.createElement('div');
+  div.innerHTML = '<a href="' + f.url + '" download>' + '?? ' + escapeHtml(f.name || f.filename || 'file') + '</a>';
+  cont.appendChild(div);
+  const sec = document.getElementById('filesSection');
+  if (sec) sec.style.display = 'block';
+}
+let currentChatId = '';
 async function send() {
   const text = input.value.trim();
   if (!text || sendBtn.disabled) return;
@@ -1536,7 +1574,7 @@ async function send() {
     const res = await fetch('/api/chat/stream', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: text })
+      body: JSON.stringify({ message: text, chatId: currentChatId })
     });
     if (!res.ok) throw new Error('HTTP ' + res.status);
     if (!res.body) throw new Error('Streaming is not supported in this browser.');
