@@ -62,6 +62,16 @@ public final class OpenAiCompatTransport {
 
     /** POSTs a chat completion body and returns the assistant reply, trimmed. */
     String complete(String path, String body) throws LlmException {
+        JsonNode message = completeMessage(path, body);
+        JsonNode content = message.path("content");
+        if (!content.isMissingNode() && !content.isNull()) {
+            return content.asText().trim();
+        }
+        throw new LlmException(providerLabel + " response had no message content.");
+    }
+
+    /** POSTs a chat completion body and returns the raw assistant message node. */
+    JsonNode completeMessage(String path, String body) throws LlmException {
         try {
             HttpRequest request = post(path, body, COMPLETE_TIMEOUT_SECONDS);
             HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString());
@@ -69,7 +79,16 @@ public final class OpenAiCompatTransport {
                 throw new LlmException(providerLabel + " returned HTTP "
                         + response.statusCode() + ": " + response.body());
             }
-            return replyContent(parse(response.body()));
+            JsonNode root = parse(response.body());
+            throwIfError(root);
+            JsonNode choices = root.path("choices");
+            if (choices.isArray() && !choices.isEmpty()) {
+                JsonNode message = choices.get(0).path("message");
+                if (!message.isMissingNode() && !message.isNull()) {
+                    return message;
+                }
+            }
+            throw new LlmException(providerLabel + " response had no message content.");
         } catch (LlmException e) {
             throw e;
         } catch (Exception e) {
@@ -181,26 +200,6 @@ public final class OpenAiCompatTransport {
             }
         }
         return false;
-    }
-
-    private String replyContent(JsonNode root) throws LlmException {
-        throwIfError(root);
-        JsonNode content = messageContent(root);
-        if (content != null) {
-            return content.asText().trim();
-        }
-        throw new LlmException(providerLabel + " response had no message content.");
-    }
-
-    private static JsonNode messageContent(JsonNode root) {
-        JsonNode choices = root.path("choices");
-        if (choices.isArray() && !choices.isEmpty()) {
-            JsonNode content = choices.get(0).path("message").path("content");
-            if (!content.isMissingNode() && !content.isNull()) {
-                return content;
-            }
-        }
-        return null;
     }
 
     private static String deltaContent(JsonNode root) {

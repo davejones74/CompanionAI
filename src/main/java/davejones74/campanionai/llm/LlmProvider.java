@@ -1,5 +1,7 @@
 package davejones74.campanionai.llm;
 
+import com.fasterxml.jackson.databind.JsonNode;
+
 import java.util.List;
 
 /**
@@ -30,6 +32,15 @@ public interface LlmProvider {
 
     /** Delivers reply deltas to {@code handler} as they arrive. */
     void chatStream(List<LlmMessage> messages, ChunkHandler handler) throws LlmException;
+
+    /**
+     * Sends a non-streaming completion request advertising the given tool
+     * definitions and returns the raw assistant message node, which may carry
+     * {@code tool_calls} instead of {@code content}.
+     */
+    default JsonNode chatMessage(List<LlmMessage> messages, List<JsonNode> tools) throws LlmException {
+        throw new UnsupportedOperationException(providerName() + " does not support tool calls");
+    }
 
     /**
      * Lists the model identifiers this runtime currently has available.

@@ -91,14 +91,27 @@ public final class OllamaProvider implements LlmProvider {
     }
 
     @Override
+    public com.fasterxml.jackson.databind.JsonNode chatMessage(List<LlmMessage> messages,
+                                                               java.util.List<com.fasterxml.jackson.databind.JsonNode> tools)
+            throws LlmException {
+        return transport.completeMessage(OpenAiChat.chatCompletionsPath(),
+                body(messages, false, tools).toString());
+    }
+
+    @Override
     public List<String> listModels() throws LlmException {
         return OpenAiCompatTransport.readModelIds(
                 transport.getJson(OpenAiChat.modelsPath()));
     }
 
     private ObjectNode body(List<LlmMessage> messages, boolean stream) {
+        return body(messages, stream, null);
+    }
+
+    private ObjectNode body(List<LlmMessage> messages, boolean stream,
+                            java.util.List<com.fasterxml.jackson.databind.JsonNode> tools) {
         ObjectNode node = OpenAiChat.envelope(
-                transport.mapper(), model, messages, temperature, stream);
+                transport.mapper(), model, messages, temperature, stream, tools);
         if (numCtx != null) {
             node.set("options", transport.mapper().createObjectNode().put("num_ctx", numCtx));
         }

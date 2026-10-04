@@ -36,8 +36,24 @@ documents (`.txt`, `.docx`, `.pdf`) and **web articles**.
 - **Polished chat UI**: scrollable chat history, multi-line input (4 rows,
   auto-growing, cursor-resizable), thinking animation while waiting for a
   reply, and subtle audio tones on send/reply.
+- **LLM-created downloadable files**: when the active model supports tool
+  calling (`LlmCapability.TOOL_CALLING`), it can request a generated file via a
+  CompanionAI-owned `create_file` tool (Markdown, text, JSON, CSV). Files are
+  written under `data/generated/`, validated for safe filenames, type and size,
+  and served through the authenticated `/api/files/{name}` endpoint as
+  download links in the chat UI.
+- **Reported sources**: answers built from fetched web content or live
+  retrieval list the actual external source URLs beneath the reply. Sources and
+  files are preserved per message in chat history.
+- **Context meter**: the footer bar shows the percentage of the configured
+  context window the assembled prompt occupies (`Context: N% (used / limit)`),
+  computed from the real system prompt, history, retrieval results and user
+  message.
+- **Persistent chats**: conversations are stored as JSON under `data/chats/`
+  and survive restarts. A sidebar supports new, switching, renaming and
+  deleting chats; the first user message seeds the initial title.
 - **Embedded Tomcat** web server with JSON API (`/api/chat`, `/api/chat/stream`,
-  `/api/stats`, `/upload`).
+  `/api/stats`, `/api/chats`, `/api/files`, `/upload`).
 - **Live information retrieval**: the assistant can answer current-information
   questions by pulling in **web search results** (Tavily), **weather** (Open-Meteo,
   no key needed), or **football standings & fixtures** (API-Football). Retrieval
@@ -244,8 +260,14 @@ data/                      # Knowledge base documents (created at runtime)
 |------------------------|--------|-----------------------------------------------------|
 | `/`                    | GET    | The SPA (or the sign-in page if auth is enabled)    |
 | `/api/chat`            | POST   | JSON reply `{"message": "..."}` → `{reply, offline}` |
-| `/api/chat/stream`     | POST   | Server-Sent Events: `delta` / `status` / `error` / `done` |
+| `/api/chat/stream`     | POST   | Server-Sent Events: `delta` / `status` / `source` / `file` / `metadata` / `error` / `done` |
 | `/api/stats`           | GET    | JSON usage statistics                               |
+| `/api/chats`           | GET    | List chats                                          |
+| `/api/chats`           | POST   | Create a chat                                       |
+| `/api/chats/{id}`      | GET    | Chat metadata + persisted messages                  |
+| `/api/chats/{id}`      | PATCH  | Rename (`{"title": "..."}`)                         |
+| `/api/chats/{id}`      | DELETE | Delete the chat and its messages                    |
+| `/api/files/{name}`    | GET    | Download a generated file (from `data/generated/`)  |
 | `/api/auth`            | POST   | Sign in (when auth enabled): `{"token": "..."}`     |
 | `/api/shutdown`        | POST   | Gracefully stop the server (localhost only)         |
 | `/upload`              | POST   | Multipart document upload → joins the knowledge base |

@@ -37,13 +37,24 @@ public final class ToolExecutor {
         return new ToolResult(List.of());
     }
 
+    public static final long MAX_CONTENT_BYTES = 1024 * 1024;
+    private static final java.util.Set<String> ALLOWED_EXTENSIONS =
+            java.util.Set.of(".md", ".txt", ".json", ".csv");
+
     public FileRef createFile(JsonNode args) throws IOException {
         String filename = args.path("filename").asText("");
         String mimeType = args.path("mimeType").asText("text/plain");
         String content = args.path("content").asText("");
+        if (content.getBytes(StandardCharsets.UTF_8).length > MAX_CONTENT_BYTES) {
+            throw new IOException("File too large (limit " + MAX_CONTENT_BYTES + " bytes)");
+        }
         String sanitized = sanitize(filename);
         if (sanitized.isBlank()) {
             sanitized = "generated-" + Instant.now().toEpochMilli() + ".txt";
+        }
+        String extCheck = extension(sanitized).toLowerCase(java.util.Locale.ROOT);
+        if (!ALLOWED_EXTENSIONS.contains(extCheck)) {
+            throw new IOException("Unsupported file type: " + extCheck);
         }
         Path target = generatedDir.resolve(sanitized).normalize();
         if (!target.startsWith(generatedDir)) {

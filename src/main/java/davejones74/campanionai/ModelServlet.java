@@ -36,6 +36,7 @@ import davejones74.campanionai.llm.LlmException;
 import davejones74.campanionai.llm.LlmMessage;
 import davejones74.campanionai.llm.LlmProvider;
 import davejones74.campanionai.llm.LlmProviderFactory;
+import davejones74.campanionai.llm.LlmCapability;
 import davejones74.campanionai.retrieval.LlmIntentClassifier;
 import davejones74.campanionai.retrieval.RetrievalKind;
 import davejones74.campanionai.retrieval.RetrievalProvider;
@@ -51,12 +52,14 @@ import davejones74.campanionai.chat.ContextUsage;
 import davejones74.campanionai.Source;
 import davejones74.campanionai.FileRef;
 import davejones74.campanionai.chat.ToolExecutor;
+import davejones74.campanionai.chat.ToolResult;
 import java.util.concurrent.atomic.AtomicReference;
 
 @MultipartConfig(maxFileSize = 10 * 1024 * 1024, maxRequestSize = 12 * 1024 * 1024)
 public class ModelServlet extends HttpServlet {
     private final ChatRules chat = new ChatRules();
-    private final ObjectMapper json = new ObjectMapper();
+    private final ObjectMapper json = new ObjectMapper()
+            .registerModule(new com.fasterxml.jackson.datatype.jsr310.JavaTimeModule());
     private LlmProvider llm;
     private Path dataDir;
 
@@ -172,8 +175,19 @@ public class ModelServlet extends HttpServlet {
         Map<String, String> urlMap = new HashMap<>();
         try (var stream = Files.walk(dataDir)) {
             for (Path p : stream.filter(Files::isRegularFile).toList()) {
+                String parent = p.getParent() != null && p.getParent().getFileName() != null
+                        ? p.getParent().getFileName().toString() : "";
+                if (parent.equals("chats") || parent.equals("generated")) {
+                    continue;
+                }
                 try (InputStream in = Files.newInputStream(p)) {
-                    String text = DocumentReader.extract(p.getFileName().toString(), in);
+                    String text;
+                    try {
+                        text = DocumentReader.extract(p.getFileName().toString(), in);
+                    } catch (IllegalArgumentException unsupported) {
+                        LOG.debug("Skipping unsupported data file {}: {}", p, unsupported.getMessage());
+                        continue;
+                    }
                     if (text.isBlank()) continue;
                     String url = parseUrlHeader(text);
                     String name = p.getFileName().toString();
@@ -427,6 +441,62 @@ public class ModelServlet extends HttpServlet {
         }
     }
 
+    public static java.util.List<LlmMessage> buildChatMessages(davejones74.campanionai.chat.ChatStore cs,
+                                                         java.util.List<LlmMessage> globalHistory,
+                                                         String system, String input, String chatId,
+                                                         int historyTokens, int maxHistoryMessages) {
+        if (cs == null || chatId == null || chatId.isBlank()) {
+            return buildMessagesFrom(globalHistory, system, input, historyTokens, maxHistoryMessages);
+        }
+        try {
+            java.util.List<ChatMessage> persisted = cs.loadMessages(chatId);
+            if (persisted.isEmpty()) {
+                return buildMessagesFrom(globalHistory, system, input, historyTokens, maxHistoryMessages);
+            }
+            java.util.List<LlmMessage> out = new java.util.ArrayList<>();
+            out.add(new LlmMessage("system", system));
+            for (ChatMessage m : persisted) {
+                out.add(new LlmMessage(m.role(), m.content()));
+            }
+            out.add(new LlmMessage("user", input));
+            while (out.size() > 2) {
+                int total = estimateTokens(system) + estimateTokens(input);
+                for (int i = 1; i < out.size() - 1; i++) {
+                    total += estimateTokens(out.get(i).content());
+                }
+                if (total <= historyTokens && out.size() - 2 <= maxHistoryMessages) {
+                    break;
+                }
+                out.remove(1);
+            }
+            return out;
+        } catch (IOException e) {
+            return buildMessagesFrom(globalHistory, system, input, historyTokens, maxHistoryMessages);
+        }
+    }
+
+    private static java.util.List<LlmMessage> buildMessagesFrom(java.util.List<LlmMessage> globalHistory,
+                                                                String system, String input,
+                                                                int historyTokens, int maxHistoryMessages) {
+        java.util.List<LlmMessage> messages = new java.util.ArrayList<>();
+        messages.add(new LlmMessage("system", system));
+        synchronized (globalHistory) {
+            messages.addAll(globalHistory);
+        }
+        messages.add(new LlmMessage("user", input));
+        while (messages.size() > 2) {
+            int total = estimateTokens(system) + estimateTokens(input);
+            for (int i = 1; i < messages.size() - 1; i++) {
+                total += estimateTokens(messages.get(i).content());
+            }
+            if (total <= historyTokens && messages.size() - 2 <= maxHistoryMessages) {
+                break;
+            }
+            messages.remove(1);
+        }
+        return messages;
+    }
+
     private List<LlmMessage> buildMessages(String system, String input) {
         synchronized (history) {
             List<LlmMessage> messages = new ArrayList<>();
@@ -456,6 +526,14 @@ public class ModelServlet extends HttpServlet {
     }
 
     private ChatResult respond(String input) {
+        return respond(input, new ArrayList<>(), "");
+    }
+
+    private ChatResult respond(String input, java.util.List<FileRef> generatedFiles) {
+        return respond(input, generatedFiles, "");
+    }
+
+    private ChatResult respond(String input, java.util.List<FileRef> generatedFiles, String chatId) {
         stats.recordStart();
         long t0 = System.nanoTime();
         if (input == null || input.trim().isEmpty()) {
@@ -475,9 +553,15 @@ public class ModelServlet extends HttpServlet {
             davejones74.campanionai.retrieval.LiveContext lc = liveContext(input);
             String live = lc.promptBlock();
             String system = systemPrompt(ctx, live);
-            List<LlmMessage> messages = buildMessages(system, input);
+            List<LlmMessage> messages = buildChatMessages(chatStoreRef.get(), history, system, input, chatId, historyTokens, maxHistoryMessages);
             stats.addInputTokens(estimateTokens(system) + estimateTokens(input));
-            String reply = llm.chat(messages);
+            java.util.List<LlmMessage> chatMessages = planFiles(messages, generatedFiles);
+            String reply;
+            if (chatMessages == messages) {
+                reply = llm.chat(messages);
+            } else {
+                reply = llm.chat(chatMessages);
+            }
             stats.addOutputTokens(estimateTokens(reply));
             stats.recordJsonReply();
             recordLatency(t0, estimateTokens(reply));
@@ -498,9 +582,11 @@ public class ModelServlet extends HttpServlet {
     private void handleStream(HttpServletRequest req, HttpServletResponse resp) {
         String input;
         PrintWriter out;
+        String chatId = "";
         try {
             JsonNode body = json.readTree(req.getInputStream());
             input = body.path("message").asText("");
+            chatId = body.path("chatId").asText("");
             resp.setContentType("text/event-stream; charset=UTF-8");
             resp.setHeader("Cache-Control", "no-cache");
             resp.setHeader("X-Accel-Buffering", "no");
@@ -534,7 +620,7 @@ public class ModelServlet extends HttpServlet {
             davejones74.campanionai.retrieval.LiveContext lc = liveContext(input);
             String live = lc.promptBlock();
             String system = systemPrompt(ctx, live);
-            List<LlmMessage> messages = buildMessages(system, input);
+            java.util.List<LlmMessage> messages = buildChatMessages(chatStoreRef.get(), history, system, input, chatId, historyTokens, maxHistoryMessages);
             stats.addInputTokens(estimateTokens(system) + estimateTokens(input));            ContextUsage cu = computeContextUsage(system, messages.subList(1, Math.max(0, messages.size()-1)), ctx, lc.promptBlock(), input);
             java.util.List<Source> sources = collectSources(urls, lc);
             for (Source s : sources) {
@@ -542,10 +628,16 @@ public class ModelServlet extends HttpServlet {
             }
             try { writeEvent(out, java.util.Map.of("metadata", java.util.Map.of("contextUsage", java.util.Map.of("used", cu.used(), "limit", cu.limit(), "percentage", cu.percentage())))); } catch (IOException e) { throw new StreamAbort(e); }
 
+            java.util.List<FileRef> generatedFiles = new java.util.ArrayList<>();
+            java.util.List<LlmMessage> streamMessages = planFiles(messages, generatedFiles);
+            for (FileRef f : generatedFiles) {
+                try { writeEvent(out, java.util.Map.of("file", java.util.Map.of("name", f.name(), "url", f.url(), "mimeType", f.mimeType(), "size", f.size()))); } catch (IOException e) { throw new StreamAbort(e); }
+            }
+
             StringBuilder replyBuilder = new StringBuilder();
             boolean offline = false;
             try {
-                llm.chatStream(messages, delta -> {
+                llm.chatStream(streamMessages, delta -> {
                     replyBuilder.append(delta);
                     try {
                         writeEvent(out, Map.of("delta", delta));
@@ -571,6 +663,19 @@ public class ModelServlet extends HttpServlet {
                 }
             }
             String reply = replyBuilder.toString();
+            try {
+                davejones74.campanionai.chat.ChatStore csPersist = chatStoreRef.get();
+                if (csPersist != null && chatId != null && !chatId.isBlank()) {
+                    csPersist.append(chatId, new ChatMessage("user", input));
+                    csPersist.append(chatId, new ChatMessage("assistant", reply).withSources(sources).withFiles(generatedFiles));
+                    davejones74.campanionai.chat.Chat c = csPersist.get(chatId);
+                    if (c != null && "New chat".equals(c.title()) && !input.isBlank()) {
+                        csPersist.rename(chatId, input.length() > 60 ? input.substring(0, 60) : input);
+                    }
+                }
+            } catch (IOException persistErr) {
+                LOG.debug("Chat persist failed: {}", persistErr.getMessage());
+            }
             appendHistory(input, reply);
             stats.addOutputTokens(estimateTokens(reply));
             stats.recordStreamed();
@@ -586,6 +691,85 @@ public class ModelServlet extends HttpServlet {
             } catch (IOException ignored) {
             }
         }
+    }
+
+    private java.util.List<LlmMessage> planFiles(java.util.List<LlmMessage> messages, java.util.List<FileRef> generatedFiles) {
+        if (llm == null || !llm.capabilities().has(LlmCapability.TOOL_CALLING)) {
+            return messages;
+        }
+        ToolExecutor te = toolExecutorRef.get();
+        if (te == null) {
+            return messages;
+        }
+        try {
+            com.fasterxml.jackson.databind.JsonNode msg = llm.chatMessage(messages, createFileTools());
+            com.fasterxml.jackson.databind.JsonNode toolCalls = msg.path("tool_calls");
+            if (!toolCalls.isArray() || toolCalls.isEmpty()) {
+                return messages;
+            }
+            java.util.List<LlmMessage> followup = new java.util.ArrayList<>(messages);
+            followup.add(LlmMessage.toolCall(toolCalls));
+            for (com.fasterxml.jackson.databind.JsonNode tc : toolCalls) {
+                String id = tc.path("id").asText("");
+                try {
+                    ToolResult tr = te.execute(normalizeToolCall(tc));
+                    generatedFiles.addAll(tr.files());
+                    followup.add(LlmMessage.toolResult(id, json.writeValueAsString(java.util.Map.of("status", "created", "files", tr.files().size()))));
+                } catch (IOException bad) {
+                    followup.add(LlmMessage.toolResult(id, json.writeValueAsString(java.util.Map.of("error", String.valueOf(bad.getMessage())))));
+                }
+            }
+            return followup;
+        } catch (Exception e) {
+            LOG.debug("Tool planning skipped: {}", e.getMessage());
+            return messages;
+        }
+    }
+
+    private java.util.List<com.fasterxml.jackson.databind.JsonNode> createFileTools() {
+        com.fasterxml.jackson.databind.node.ObjectNode tool = json.createObjectNode();
+        tool.put("type", "function");
+        com.fasterxml.jackson.databind.node.ObjectNode fn = json.createObjectNode();
+        fn.put("name", "create_file");
+        fn.put("description", "Create a downloadable file for the user (Markdown, plain text, JSON, or CSV).");
+        com.fasterxml.jackson.databind.node.ObjectNode params = json.createObjectNode();
+        params.put("type", "object");
+        com.fasterxml.jackson.databind.node.ObjectNode props = json.createObjectNode();
+        com.fasterxml.jackson.databind.node.ObjectNode filename = json.createObjectNode();
+        filename.put("type", "string");
+        props.set("filename", filename);
+        com.fasterxml.jackson.databind.node.ObjectNode mimeType = json.createObjectNode();
+        mimeType.put("type", "string");
+        props.set("mimeType", mimeType);
+        com.fasterxml.jackson.databind.node.ObjectNode content = json.createObjectNode();
+        content.put("type", "string");
+        props.set("content", content);
+        params.set("properties", props);
+        com.fasterxml.jackson.databind.node.ArrayNode required = json.createArrayNode();
+        required.add("filename");
+        required.add("content");
+        params.set("required", required);
+        fn.set("parameters", params);
+        tool.set("function", fn);
+        return java.util.List.of(tool);
+    }
+
+    private com.fasterxml.jackson.databind.JsonNode normalizeToolCall(com.fasterxml.jackson.databind.JsonNode tc) {
+        com.fasterxml.jackson.databind.JsonNode args = tc.path("function").path("arguments");
+        if (args.isTextual()) {
+            try {
+                com.fasterxml.jackson.databind.JsonNode parsed = json.readTree(args.asText());
+                com.fasterxml.jackson.databind.node.ObjectNode fn = json.createObjectNode();
+                fn.put("name", tc.path("function").path("name").asText());
+                fn.set("arguments", parsed);
+                com.fasterxml.jackson.databind.node.ObjectNode out = json.createObjectNode();
+                out.set("function", fn);
+                return out;
+            } catch (Exception e) {
+                return tc;
+            }
+        }
+        return tc;
     }
 
     private void writeEvent(PrintWriter out, Map<String, ?> fields) throws IOException {
@@ -671,6 +855,23 @@ public class ModelServlet extends HttpServlet {
             resp.setContentType("application/json; charset=UTF-8");
             resp.setHeader("Cache-Control", "no-store");
             resp.getWriter().write(stats.toJson());
+            return;
+        }
+        if (path.endsWith("/api/chats")) {
+            resp.setContentType("application/json; charset=UTF-8");
+            davejones74.campanionai.chat.ChatStore cs = chatStoreRef.get();
+            if (cs == null) { resp.sendError(503); return; }
+            resp.getWriter().write(json.writeValueAsString(cs.list()));
+            return;
+        }
+        if (path.matches(".*/api/chats/[a-zA-Z0-9_-]+$")) {
+            resp.setContentType("application/json; charset=UTF-8");
+            davejones74.campanionai.chat.ChatStore cs = chatStoreRef.get();
+            if (cs == null) { resp.sendError(503); return; }
+            String id = path.substring(path.lastIndexOf('/') + 1);
+            Chat c = cs.get(id);
+            if (c == null) { resp.sendError(404); return; }
+            resp.getWriter().write(json.writeValueAsString(java.util.Map.of("chat", c, "messages", cs.loadMessages(id))));
             return;
         }
         if (path.contains("/api/files/")) {
@@ -776,16 +977,28 @@ public class ModelServlet extends HttpServlet {
             } else if (path.endsWith("/api/chat")) {
                 JsonNode body = json.readTree(req.getInputStream());
                 String msg = body.path("message").asText("");
+                String chatId = body.path("chatId").asText("");
                 java.util.List<String> urls = findUrls(msg);
                 java.util.List<Chunk> ctx = selectContext(msg, urls);
                 davejones74.campanionai.retrieval.LiveContext lc = liveContext(msg);
                 String system = systemPrompt(ctx, lc.promptBlock());
-                java.util.List<LlmMessage> msgs = buildMessages(system, msg);
+                java.util.List<LlmMessage> msgs = buildChatMessages(chatStoreRef.get(), history, system, msg, chatId, historyTokens, maxHistoryMessages);
                 ContextUsage cu = computeContextUsage(system, msgs.subList(1, Math.max(0, msgs.size()-1)), ctx, lc.promptBlock(), msg);
                 java.util.List<Source> sources = collectSources(urls, lc);
-                java.util.List<FileRef> files = java.util.List.of();
-                String chatId = body.path("chatId").asText("");
-                ChatResult result = respond(msg);
+                java.util.List<FileRef> files = new java.util.ArrayList<>();
+                ChatResult result = respond(msg, files, chatId);
+                try {
+                    davejones74.campanionai.chat.ChatStore cs = chatStoreRef.get();
+                    if (cs != null && chatId != null && !chatId.isBlank()) {
+                        cs.append(chatId, new ChatMessage("user", msg));
+                        cs.append(chatId, new ChatMessage("assistant", result.reply()).withSources(sources).withFiles(files));
+                        davejones74.campanionai.chat.Chat c = cs.get(chatId);
+                        if (c != null && "New chat".equals(c.title()) && !msg.isBlank()) {
+                            cs.rename(chatId, msg.length() > 60 ? msg.substring(0, 60) : msg);
+                        }
+                    }
+                } catch (IOException ignored) {
+                }
                 resp.getWriter().write(json.writeValueAsString(java.util.Map.of(
                         "reply", result.reply(), "offline", result.offline(),
                         "sources", sources, "files", files,
@@ -823,6 +1036,48 @@ public class ModelServlet extends HttpServlet {
             resp.setStatus(500);
             resp.getWriter().write(json.writeValueAsString(Map.of("ok", false, "message", e.getMessage())));
         }
+    }
+
+    @Override
+    protected void service(HttpServletRequest req, HttpServletResponse resp) throws java.io.IOException, jakarta.servlet.ServletException {
+        if ("PATCH".equalsIgnoreCase(req.getMethod())) {
+            req.setCharacterEncoding("UTF-8");
+            resp.setContentType("application/json; charset=UTF-8");
+            String path = req.getRequestURI();
+            if (path.matches(".*/api/chats/[a-zA-Z0-9_-]+$")) {
+                davejones74.campanionai.chat.ChatStore cs = chatStoreRef.get();
+                if (cs == null) { resp.sendError(503); return; }
+                String id = path.substring(path.lastIndexOf('/') + 1);
+                try {
+                    JsonNode body = json.readTree(req.getInputStream());
+                    String title = body.path("title").asText(null);
+                    if (title != null) cs.rename(id, title);
+                    resp.getWriter().write(json.writeValueAsString(java.util.Map.of("ok", true)));
+                } catch (Exception e) {
+                    resp.sendError(400);
+                }
+                return;
+            }
+            resp.sendError(404);
+            return;
+        }
+        super.service(req, resp);
+    }
+
+    @Override
+    protected void doDelete(HttpServletRequest req, HttpServletResponse resp) throws IOException {
+        req.setCharacterEncoding("UTF-8");
+        resp.setContentType("application/json; charset=UTF-8");
+        String path = req.getRequestURI();
+        if (path.matches(".*/api/chats/[a-zA-Z0-9_-]+$")) {
+            davejones74.campanionai.chat.ChatStore cs = chatStoreRef.get();
+            if (cs == null) { resp.sendError(503); return; }
+            String id = path.substring(path.lastIndexOf('/') + 1);
+            cs.delete(id);
+            resp.getWriter().write(json.writeValueAsString(java.util.Map.of("ok", true)));
+            return;
+        }
+        resp.sendError(404);
     }
 
     private String page() {
@@ -885,6 +1140,32 @@ header .badge {
   padding: 4px 12px;
   font-size: 12.5px;
 }
+.app-body { flex: 1; display: flex; min-height: 0; }
+#sidebar {
+  width: 230px;
+  background: var(--panel);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  padding: 10px;
+  gap: 6px;
+  overflow-y: auto;
+}
+#sidebar h3 { margin: 4px 2px; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; }
+#new-chat-btn { width: 100%; padding: 8px; border: 1px dashed var(--border); border-radius: 8px; background: transparent; color: var(--primary); cursor: pointer; font-size: 14px; }
+#new-chat-btn:hover { background: var(--bg); }
+.chat-item { padding: 8px 10px; border-radius: 8px; cursor: pointer; display: flex; justify-content: space-between; align-items: center; gap: 6px; font-size: 14px; }
+.chat-item:hover { background: var(--bg); }
+.chat-item.active { background: var(--user-bubble); }
+.chat-item .title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+.chat-item .acts button { border: none; background: transparent; cursor: pointer; color: var(--muted); padding: 0 3px; font-size: 12.5px; }
+.chat-item .acts button:hover { color: var(--primary-dark); }
+.main-col { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+#meta-bar { display: flex; gap: 14px; align-items: center; padding: 4px 16px; font-size: 12.5px; color: var(--muted); background: var(--panel); border-top: 1px solid var(--border); }
+#context-bar-wrap { flex: 0 0 120px; height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; }
+#context-bar-wrap > div { height: 100%; width: 0%; background: var(--primary); }
+#sources-section, #files-section { padding: 4px 16px; font-size: 13px; background: var(--panel); border-top: 1px solid var(--border); }
+#sources-section a, #files-section a { margin-right: 14px; }
 main {
   flex: 1;
   overflow-y: auto;
@@ -900,7 +1181,22 @@ main {
 }
 .msg { display: flex; }
 .msg.user { justify-content: flex-end; }
-.msg.assistant { justify-content: flex-start; }
+.msg.assistant { justify-content: flex-start; position: relative; }
+.copy-btn {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--muted);
+  border-radius: 6px;
+  padding: 3px 5px;
+  cursor: pointer;
+  line-height: 0;
+  opacity: .7;
+}
+.copy-btn:hover { opacity: 1; color: var(--primary-dark); }
+.copy-btn.copied { color: #2e7d32; }
 .bubble {
   max-width: 78%;
   padding: 10px 14px;
@@ -1153,11 +1449,25 @@ details.stats .stat-grid b { color: var(--text); font-weight: 600; }
   </details>
 </header>
 
+<div class="app-body">
+<aside id="sidebar">
+  <button id="new-chat-btn">+ New Chat</button>
+  <h3>Chats</h3>
+  <div id="chat-list"></div>
+</aside>
+<div class="main-col">
 <main>
   <div class="chat" id="chat-log">
     <div class="empty-hint">Ask a question, paste a URL and I'll fetch and read it, or just say hello. Your conversation will stay here so you can scroll back through it.</div>
   </div>
 </main>
+
+<div id="sourcesSection" style="display:none"><b>Sources</b><div id="sourcesList"></div></div>
+<div id="filesSection" style="display:none"><b>Files</b><div id="filesList"></div></div>
+<div id="meta-bar">
+  <span>Context: <b id="contextPct">-</b> (<span id="contextText">0 / 0</span>)</span>
+  <div id="context-bar-wrap"><div id="contextBar"></div></div>
+</div>
 
 <footer>
   <div class="composer">
@@ -1173,6 +1483,8 @@ details.stats .stat-grid b { color: var(--text); font-weight: 600; }
     </div>
   </div>
 </footer>
+</div>
+</div>
 
 <div class="toast" id="toast"></div>
 
@@ -1262,17 +1574,17 @@ function mdRow(l) {
   return l.trim().replace(/^\\|/, '').replace(/\\|$/, '').split('|').map(function (c) { return c.trim(); });
 }
 const MATH_SYMS = {
-  alpha:'α', beta:'β', gamma:'γ', Gamma:'Γ', delta:'δ', Delta:'Δ', epsilon:'ε', varepsilon:'ε',
-  zeta:'ζ', eta:'η', theta:'θ', Theta:'Θ', lambda:'λ', Lambda:'Λ', mu:'μ', nu:'ν', xi:'ξ',
-  pi:'π', Pi:'Π', rho:'ρ', sigma:'σ', Sigma:'Σ', tau:'τ', upsilon:'υ', phi:'φ', Phi:'Φ',
-  psi:'ψ', Psi:'Ψ', chi:'χ', omega:'ω', Omega:'Ω',
-  partial:'∂', nabla:'∇', sum:'∑', prod:'∏', int:'∫', infty:'∞',
-  odot:'⊙', otimes:'⊗', oplus:'⊕', cdot:'·', times:'×', pm:'±', mp:'∓',
-  to:'→', rightarrow:'→', leftarrow:'←', rightleftharpoons:'⇌',
-  in:'∈', notin:'∉', subset:'⊂', subseteq:'⊆', supset:'⊃', supseteq:'⊇',
-  cup:'∪', cap:'∩', approx:'≈', propto:'∝', equiv:'≡', sim:'∼', ne:'≠', le:'≤', ge:'≥',
-  ldots:'…', cdots:'⋯', prime:'′', ell:'ℓ', top:'⊤', bot:'⊥', neg:'¬', and:'∧', or:'∨',
-  nonumber:'', quad:' ', qquad:'  ', circ:'°'
+  alpha:'ÃƒÅ½Ã‚Â±', beta:'ÃƒÅ½Ã‚Â²', gamma:'ÃƒÅ½Ã‚Â³', Gamma:'ÃƒÅ½Ã¢â‚¬Å“', delta:'ÃƒÅ½Ã‚Â´', Delta:'ÃƒÅ½Ã¢â‚¬Â', epsilon:'ÃƒÅ½Ã‚Âµ', varepsilon:'ÃƒÅ½Ã‚Âµ',
+  zeta:'ÃƒÅ½Ã‚Â¶', eta:'ÃƒÅ½Ã‚Â·', theta:'ÃƒÅ½Ã‚Â¸', Theta:'ÃƒÅ½Ã‹Å“', lambda:'ÃƒÅ½Ã‚Â»', Lambda:'ÃƒÅ½Ã¢â‚¬Âº', mu:'ÃƒÅ½Ã‚Â¼', nu:'ÃƒÅ½Ã‚Â½', xi:'ÃƒÅ½Ã‚Â¾',
+  pi:'ÃƒÂÃ¢â€šÂ¬', Pi:'ÃƒÅ½Ã‚Â ', rho:'ÃƒÂÃ‚Â', sigma:'ÃƒÂÃ†â€™', Sigma:'ÃƒÅ½Ã‚Â£', tau:'ÃƒÂÃ¢â‚¬Å¾', upsilon:'ÃƒÂÃ¢â‚¬Â¦', phi:'ÃƒÂÃ¢â‚¬Â ', Phi:'ÃƒÅ½Ã‚Â¦',
+  psi:'ÃƒÂÃ‹â€ ', Psi:'ÃƒÅ½Ã‚Â¨', chi:'ÃƒÂÃ¢â‚¬Â¡', omega:'ÃƒÂÃ¢â‚¬Â°', Omega:'ÃƒÅ½Ã‚Â©',
+  partial:'ÃƒÂ¢Ã‹â€ Ã¢â‚¬Å¡', nabla:'ÃƒÂ¢Ã‹â€ Ã¢â‚¬Â¡', sum:'ÃƒÂ¢Ã‹â€ Ã¢â‚¬Ëœ', prod:'ÃƒÂ¢Ã‹â€ Ã‚Â', int:'ÃƒÂ¢Ã‹â€ Ã‚Â«', infty:'ÃƒÂ¢Ã‹â€ Ã…Â¾',
+  odot:'ÃƒÂ¢Ã…Â Ã¢â€žÂ¢', otimes:'ÃƒÂ¢Ã…Â Ã¢â‚¬â€', oplus:'ÃƒÂ¢Ã…Â Ã¢â‚¬Â¢', cdot:'Ãƒâ€šÃ‚Â·', times:'ÃƒÆ’Ã¢â‚¬â€', pm:'Ãƒâ€šÃ‚Â±', mp:'ÃƒÂ¢Ã‹â€ Ã¢â‚¬Å“',
+  to:'ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢', rightarrow:'ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢', leftarrow:'ÃƒÂ¢Ã¢â‚¬Â Ã‚Â', rightleftharpoons:'ÃƒÂ¢Ã¢â‚¬Â¡Ã…â€™',
+  in:'ÃƒÂ¢Ã‹â€ Ã‹â€ ', notin:'ÃƒÂ¢Ã‹â€ Ã¢â‚¬Â°', subset:'ÃƒÂ¢Ã…Â Ã¢â‚¬Å¡', subseteq:'ÃƒÂ¢Ã…Â Ã¢â‚¬Â ', supset:'ÃƒÂ¢Ã…Â Ã†â€™', supseteq:'ÃƒÂ¢Ã…Â Ã¢â‚¬Â¡',
+  cup:'ÃƒÂ¢Ã‹â€ Ã‚Âª', cap:'ÃƒÂ¢Ã‹â€ Ã‚Â©', approx:'ÃƒÂ¢Ã¢â‚¬Â°Ã‹â€ ', propto:'ÃƒÂ¢Ã‹â€ Ã‚Â', equiv:'ÃƒÂ¢Ã¢â‚¬Â°Ã‚Â¡', sim:'ÃƒÂ¢Ã‹â€ Ã‚Â¼', ne:'ÃƒÂ¢Ã¢â‚¬Â°Ã‚Â ', le:'ÃƒÂ¢Ã¢â‚¬Â°Ã‚Â¤', ge:'ÃƒÂ¢Ã¢â‚¬Â°Ã‚Â¥',
+  ldots:'ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦', cdots:'ÃƒÂ¢Ã¢â‚¬Â¹Ã‚Â¯', prime:'ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â²', ell:'ÃƒÂ¢Ã¢â‚¬Å¾Ã¢â‚¬Å“', top:'ÃƒÂ¢Ã…Â Ã‚Â¤', bot:'ÃƒÂ¢Ã…Â Ã‚Â¥', neg:'Ãƒâ€šÃ‚Â¬', and:'ÃƒÂ¢Ã‹â€ Ã‚Â§', or:'ÃƒÂ¢Ã‹â€ Ã‚Â¨',
+  nonumber:'', quad:' ', qquad:'  ', circ:'Ãƒâ€šÃ‚Â°'
 };
 function mathReadGroup(s, i) {
   if (s.charAt(i) !== '{') return null;
@@ -1311,8 +1623,8 @@ function renderMath(s) {
       }
       if (cmd === 'sqrt') {
         const g = mathReadGroup(s, k);
-        if (g) { out += '√(' + renderMath(g.inner) + ')'; i = g.end; continue; }
-        out += '√'; i = k; continue;
+        if (g) { out += 'ÃƒÂ¢Ã‹â€ Ã…Â¡(' + renderMath(g.inner) + ')'; i = g.end; continue; }
+        out += 'ÃƒÂ¢Ã‹â€ Ã…Â¡'; i = k; continue;
       }
       if (cmd === 'left' || cmd === 'right' || cmd === 'big' || cmd === 'Big' ||
           cmd === 'bigl' || cmd === 'bigr' || cmd === 'biggl' || cmd === 'biggr') {
@@ -1488,17 +1800,51 @@ function mdRender(src) {
   }
   return out.join('').replace(/@@M(\\d+)[bi]@@/g, function (m, k) { return maths[Number(k)].html; });
 }
-function addMsg(role, text, offline) {
-  if (emptyHint) { emptyHint.remove(); emptyHint = null; }
-  const wrap = document.createElement('div');
-  wrap.className = 'msg ' + role;
-  const inner = document.createElement('div');
-  inner.className = 'bubble';
-  if (role === 'assistant') {
-    inner.innerHTML = mdRender(text);
-  } else {
-    inner.textContent = text;
+  function addCopyButton(wrap, getText) {
+    const btn = document.createElement('button');
+    btn.className = 'copy-btn';
+    btn.title = 'Copy response';
+    btn.setAttribute('aria-label', 'Copy response');
+    const copyIcon = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>';
+    const checkIcon = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>';
+    btn.innerHTML = copyIcon;
+    btn.addEventListener('click', function () {
+      const text = (typeof getText === 'function') ? getText() : getText;
+      const done = function () {
+        btn.innerHTML = checkIcon;
+        btn.classList.add('copied');
+        setTimeout(function () { btn.innerHTML = copyIcon; btn.classList.remove('copied'); }, 1500);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(done).catch(function () { fallbackCopy(text); done(); });
+      } else {
+        fallbackCopy(text);
+        done();
+      }
+    });
+    wrap.appendChild(btn);
   }
+  function fallbackCopy(text) {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); } catch (e) {}
+    ta.remove();
+  }
+  function addMsg(role, text, offline) {
+    if (emptyHint) { emptyHint.remove(); emptyHint = null; }
+    const wrap = document.createElement('div');
+    wrap.className = 'msg ' + role;
+    const inner = document.createElement('div');
+    inner.className = 'bubble';
+    if (role === 'assistant') {
+      inner.innerHTML = mdRender(text);
+      wrap.style.position = 'relative';
+      addCopyButton(wrap, text);
+    } else {
+      inner.textContent = text;
+    }
   wrap.appendChild(inner);
   if (offline) {
     const tag = document.createElement('span');
@@ -1536,9 +1882,12 @@ function appendSource(src) {
   if (!src || !src.url) return;
   const cont = document.getElementById('sourcesList');
   if (!cont) return;
-  const div = document.createElement('div');
-  div.innerHTML = '<a href="' + src.url + '" target="_blank" rel="noopener noreferrer">?? ' + escapeHtml(src.title || src.url) + '</a>';
-  cont.appendChild(div);
+  const a = document.createElement('a');
+  a.href = src.url;
+  a.target = '_blank';
+  a.rel = 'noopener noreferrer';
+  a.textContent = src.title || src.url;
+  cont.appendChild(a);
   const sec = document.getElementById('sourcesSection');
   if (sec) sec.style.display = 'block';
 }
@@ -1546,16 +1895,106 @@ function appendFile(f) {
   if (!f || !f.url) return;
   const cont = document.getElementById('filesList');
   if (!cont) return;
-  const div = document.createElement('div');
-  div.innerHTML = '<a href="' + f.url + '" download>' + '?? ' + escapeHtml(f.name || f.filename || 'file') + '</a>';
-  cont.appendChild(div);
+  const a = document.createElement('a');
+  a.href = f.url;
+  a.setAttribute('download', '');
+  a.textContent = (f.name || f.filename || 'file');
+  cont.appendChild(a);
   const sec = document.getElementById('filesSection');
   if (sec) sec.style.display = 'block';
 }
 let currentChatId = '';
+function loadChats() {
+  fetch('/api/chats').then(r => r.json()).then(renderChats).catch(() => {});
+}
+function renderChats(chats) {
+  const list = document.getElementById('chat-list');
+  if (!list) return;
+  list.innerHTML = '';
+  (chats || []).forEach(c => {
+    const div = document.createElement('div');
+    div.className = 'chat-item' + (c.id === currentChatId ? ' active' : '');
+    const t = document.createElement('span');
+    t.className = 'title';
+    t.textContent = c.title || 'New chat';
+    t.addEventListener('click', () => selectChat(c.id));
+    const acts = document.createElement('span');
+    acts.className = 'acts';
+    const rn = document.createElement('button');
+    rn.textContent = 'Rename';
+    rn.addEventListener('click', (e) => { e.stopPropagation(); renameChat(c.id, c.title); });
+    const del = document.createElement('button');
+    del.textContent = 'Delete';
+    del.addEventListener('click', (e) => { e.stopPropagation(); deleteChat(c.id); });
+    acts.appendChild(rn);
+    acts.appendChild(del);
+    div.appendChild(t);
+    div.appendChild(acts);
+    list.appendChild(div);
+  });
+}
+function selectChat(id) {
+  currentChatId = id;
+  fetch('/api/chats/' + id).then(r => r.json()).then(data => {
+    const log = document.getElementById('chat-log');
+    log.innerHTML = '';
+    (data.messages || []).forEach(m => {
+      if (m.role === 'user') addMsg('user', m.content);
+      else {
+        addMsg('assistant', m.content);
+        (m.sources || []).forEach(appendSource);
+        (m.files || []).forEach(appendFile);
+      }
+    });
+    resetMeta();
+    loadChats();
+  }).catch(() => {});
+}
+function newChat() {
+  fetch('/api/chats', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: 'New chat' }) })
+    .then(r => r.json()).then(c => {
+      currentChatId = c.id;
+      document.getElementById('chat-log').innerHTML = '';
+      resetMeta();
+      loadChats();
+    }).catch(() => {});
+}
+function renameChat(id, current) {
+  const name = window.prompt('Rename chat:', current || '');
+  if (name == null) return;
+  fetch('/api/chats/' + id, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: name }) })
+    .then(() => loadChats()).catch(() => {});
+}
+function deleteChat(id) {
+  if (!window.confirm('Delete this chat?')) return;
+  fetch('/api/chats/' + id, { method: 'DELETE' }).then(() => {
+    if (currentChatId === id) {
+      currentChatId = '';
+      document.getElementById('chat-log').innerHTML = '';
+      resetMeta();
+    }
+    loadChats();
+  }).catch(() => {});
+}
+function resetMeta() {
+  const s = document.getElementById('sourcesSection'); if (s) s.style.display = 'none';
+  const sl = document.getElementById('sourcesList'); if (sl) sl.innerHTML = '';
+  const f = document.getElementById('filesSection'); if (f) f.style.display = 'none';
+  const fl = document.getElementById('filesList'); if (fl) fl.innerHTML = '';
+}
+document.getElementById('new-chat-btn').addEventListener('click', newChat);
+loadChats();
 async function send() {
   const text = input.value.trim();
   if (!text || sendBtn.disabled) return;
+  if (!currentChatId) {
+    try {
+      const c = await (await fetch('/api/chats', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: 'New chat' }) })).json();
+      currentChatId = c.id;
+      loadChats();
+    } catch (e) { /* offline; chatId stays blank */ }
+  }
+  resetMeta();
   addMsg('user', text);
   let thinkEl = document.createElement('div');
   thinkEl.className = 'msg assistant thinking';
@@ -1623,7 +2062,12 @@ async function send() {
             }
             inner.innerHTML = mdRender(acc);
             await new Promise(r => requestAnimationFrame(() => r()));
-          }} catch (e) {
+          }
+        }
+      }
+    }
+    if (bubble) addCopyButton(bubble, acc);
+  } catch (e) {
     if (thinkEl) thinkEl.remove();
     if (bubble) bubble.remove();
     addMsg('assistant', 'Sorry, something went wrong: ' + e.message);
@@ -1632,6 +2076,7 @@ async function send() {
     sendBtn.disabled = false;
     input.focus();
     refreshStats();
+    loadChats();
   }
 }
 sendBtn.addEventListener('click', send);
