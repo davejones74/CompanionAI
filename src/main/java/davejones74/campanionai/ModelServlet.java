@@ -1837,7 +1837,6 @@ details.stats .stat-grid b { color: var(--text); font-weight: 600; }
       <label class="file-label" for="file-input">Upload document (.txt, .docx, .pdf)</label>
       <input type="file" id="file-input" accept=".txt,.docx,.pdf">
       <span id="file-name"></span>
-      <label style="display:flex;align-items:center;gap:6px;font-size:13.5px;color:#6b7686;cursor:pointer;"><input type="checkbox" id="show-thinking" style="width:14px;height:14px;"><span>Show thinking</span></label>
       <button class="btn" id="upload-btn" style="padding:6px 14px;font-size:13.5px;">Upload</button>
     </div>
   </div>
@@ -1855,23 +1854,7 @@ const sendBtn = document.getElementById('send-btn');
 const fileInput = document.getElementById('file-input');
 const uploadBtn = document.getElementById('upload-btn');
 const fileName = document.getElementById('file-name');
-const showThinking = document.getElementById('show-thinking');
 const docCount = document.getElementById('doc-count');
-if (showThinking) {
-  try { showThinking.checked = (localStorage.getItem('showThinking') === '1'); } catch (e) {}
-  showThinking.addEventListener('change', function() {
-    try { localStorage.setItem('showThinking', showThinking.checked ? '1' : '0'); } catch (e) {}
-    if (thinkEl) {
-      if (showThinking.checked) {
-        thinkEl.style.display = 'flex';
-        thinkEl.innerHTML = '<span>thinking</span><span class="dots"><span></span><span></span><span></span></span><div class="bubble" style="margin-top:6px;background:#fafbfe;">' + mdRender(thoughtAcc) + '</div>';
-      } else {
-        thinkEl.style.display = 'flex';
-        thinkEl.innerHTML = '<span>thinking</span><span class="dots"><span></span><span></span><span></span></span>';
-      }
-    }
-  });
-}
 
 function tone(ctx, freq, start, dur, vol) {
   const o = ctx.createOscillator();
@@ -2473,11 +2456,7 @@ async function send() {
               chatLog.appendChild(thinkEl);
             }
             thinkEl.style.display = 'flex';
-            if (showThinking && showThinking.checked) {
-              thinkEl.innerHTML = '<span>thinking</span><span class="dots"><span></span><span></span><span></span></span><div class="bubble" style="margin-top:6px;background:#fafbfe;">' + mdRender(thoughtAcc) + '</div>';
-            } else {
-              thinkEl.innerHTML = '<span>thinking</span><span class="dots"><span></span><span></span><span></span></span>';
-            }
+            thinkEl.innerHTML = '<span>thinking</span><span class="dots"><span></span><span></span><span></span></span><div class="bubble" style="margin-top:6px;background:#fafbfe;">' + mdRender(thoughtAcc) + '</div>';
             chatLog.scrollTo({ top: chatLog.scrollHeight, behavior: 'smooth' });
           }
           if (data.delta) {
