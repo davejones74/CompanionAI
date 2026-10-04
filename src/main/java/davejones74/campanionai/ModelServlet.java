@@ -1238,6 +1238,8 @@ main {
 }
 .bubble { position: relative; }
 .msg.assistant .bubble { padding-right: 30px; }
+.bubble pre { position: relative; }
+.bubble pre .copy-btn { top: 6px; right: 6px; }
 .copy-btn:hover { opacity: 1; color: var(--primary-dark); }
 .copy-btn.copied { color: #2e7d32; }
 .bubble {
@@ -1846,6 +1848,15 @@ function mdRender(src) {
   }
   return out.join('').replace(/@@M(\\d+)[bi]@@/g, function (m, k) { return maths[Number(k)].html; });
 }
+  function addCodeCopyButtons(container) {
+    if (!container || !container.querySelectorAll) return;
+    container.querySelectorAll('pre').forEach(function (pre) {
+      if (pre.dataset.copyAdded) return;
+      pre.dataset.copyAdded = '1';
+      const text = pre.textContent;
+      addCopyButton(pre, function () { return text; });
+    });
+  }
   function addCopyButton(wrap, getText) {
     const btn = document.createElement('button');
     btn.className = 'copy-btn';
@@ -1887,6 +1898,7 @@ function mdRender(src) {
     if (role === 'assistant') {
       inner.innerHTML = mdRender(text);
       addCopyButton(inner, text);
+      addCodeCopyButtons(inner);
     } else {
       inner.textContent = text;
     }
@@ -2123,6 +2135,7 @@ async function send() {
               chatLog.scrollTo({ top: chatLog.scrollHeight, behavior: 'smooth' });
             }
             inner.innerHTML = mdRender(acc);
+            addCodeCopyButtons(inner);
             await new Promise(r => requestAnimationFrame(() => r()));
           }
         }
