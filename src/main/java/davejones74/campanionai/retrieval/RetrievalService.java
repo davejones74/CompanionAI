@@ -1,12 +1,20 @@
 package davejones74.campanionai.retrieval;
 
 import davejones74.campanionai.Tokens;
+import davejones74.campanionai.Source;
 import davejones74.campanionai.llm.LlmMessage;
 
+import java.util.ArrayList;
 import java.util.EnumMap;
+import java.util.List;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.ArrayList;
+import davejones74.campanionai.Source;
+
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 /**
  * Orchestrates classification and provider dispatch for external information.
@@ -14,6 +22,8 @@ import java.util.Optional;
  * notice inside the prompt so the conversation continues normally.
  */
 public final class RetrievalService {
+
+    private static final Logger LOG = LogManager.getLogger(RetrievalService.class);
 
     private final IntentClassifier rules;
     private final IntentClassifier llmClassifier;
@@ -42,16 +52,16 @@ public final class RetrievalService {
             classification = llmClassifier.classify(input, history);
         }
         if (classification.isEmpty()) {
-            return new LiveContext("", false, false);
+            return new LiveContext("", false, false, List.of());
         }
         IntentClassification cls = classification.get();
         RetrievalKind kind = toKind(cls.intent());
         if (kind == null) {
-            return new LiveContext("", false, false);
+            return new LiveContext("", false, false, List.of());
         }
         RetrievalProvider provider = providers.get(kind);
         if (provider == null || !provider.isConfigured()) {
-            return new LiveContext("", false, false);
+            return new LiveContext("", false, false, List.of());
         }
         String location = cls.location() != null ? cls.location() : defaultLocation;
         Freshness freshness = switch (kind) {
@@ -63,9 +73,9 @@ public final class RetrievalService {
         try {
             RetrievalResult result = provider.retrieve(request);
             if (result.items().isEmpty()) {
-                return new LiveContext(notice("The search returned no results."), true, false);
+                return new LiveContext(notice("The search returned no results."), true, false, List.of());
             }
-            return new LiveContext(format(result), true, false);
+            return new LiveContext(format(result), true, false, toSources(result));
         } catch (RetrievalException e) {
             LOG.warn("Live retrieval failed ({}) : {}", kind, String.valueOf(e.getMessage()));
             // A sports provider on a plan that does not cover the current season
@@ -81,13 +91,13 @@ public final class RetrievalService {
                 try {
                     RetrievalResult result = fallback.retrieve(retry);
                     if (!result.items().isEmpty()) {
-                        return new LiveContext(format(result), true, false);
+                        return new LiveContext(format(result), true, false, toSources(result));
                     }
                 } catch (RetrievalException retryError) {
                     LOG.warn("Fallback {} failed : {}", fallbackKind, String.valueOf(retryError.getMessage()));
                 }
             }
-            return new LiveContext(notice(e.userFacingMessage()), true, true);
+            return new LiveContext(notice(e.userFacingMessage()), true, true, List.of());
         }
     }
 
@@ -154,6 +164,16 @@ public final class RetrievalService {
         return "[Note: " + message + "]";
     }
 
-    private static final org.apache.logging.log4j.Logger LOG =
-            org.apache.logging.log4j.LogManager.getLogger(RetrievalService.class);
+
+
+    private List<Source> toSources(RetrievalResult result) {
+        List<Source> sources = new ArrayList<>();
+        if (result == null || result.items() == null) return sources;
+        for (RetrievalItem item : result.items()) {
+            if (item.url() != null && !item.url().isBlank()) {
+                sources.add(new Source(item.title(), item.url()));
+            }
+        }
+        return sources;
+    }
 }

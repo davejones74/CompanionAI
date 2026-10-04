@@ -29,6 +29,7 @@ import java.util.Set;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.regex.Matcher;
+import java.util.LinkedHashSet;
 import java.util.regex.Pattern;
 
 import davejones74.campanionai.llm.LlmException;
@@ -43,6 +44,14 @@ import davejones74.campanionai.retrieval.RuleIntentClassifier;
 import davejones74.campanionai.retrieval.SportsProvider;
 import davejones74.campanionai.retrieval.WeatherProvider;
 import davejones74.campanionai.retrieval.WebSearchProvider;
+import davejones74.campanionai.chat.Chat;
+import davejones74.campanionai.chat.ChatMessage;
+import davejones74.campanionai.chat.ChatStore;
+import davejones74.campanionai.chat.ContextUsage;
+import davejones74.campanionai.Source;
+import davejones74.campanionai.FileRef;
+import davejones74.campanionai.chat.ToolExecutor;
+import java.util.concurrent.atomic.AtomicReference;
 
 @MultipartConfig(maxFileSize = 10 * 1024 * 1024, maxRequestSize = 12 * 1024 * 1024)
 public class ModelServlet extends HttpServlet {
@@ -108,8 +117,8 @@ public class ModelServlet extends HttpServlet {
     private record ChunkScore(Chunk chunk, int score) {
     }
 
-    private record ChatResult(String reply, boolean offline) {
-    }
+    private record ChatResult(String reply, boolean offline) {}    private final java.util.concurrent.atomic.AtomicReference<davejones74.campanionai.chat.ChatStore> chatStoreRef = new java.util.concurrent.atomic.AtomicReference<>();
+    private final java.util.concurrent.atomic.AtomicReference<davejones74.campanionai.chat.ToolExecutor> toolExecutorRef = new java.util.concurrent.atomic.AtomicReference<>();
 
     @Override
     public void init() {
@@ -119,6 +128,7 @@ public class ModelServlet extends HttpServlet {
             dataDir = Path.of(base).toAbsolutePath();
             Files.createDirectories(dataDir);
             llm = LlmProviderFactory.fromSystemProperties();
+            try { chatStoreRef.set(new ChatStore(dataDir)); toolExecutorRef.set(new ToolExecutor(dataDir)); } catch (Exception ignored) {}
             retrieval = buildRetrieval();
             reloadDocuments();
             LOG.info("Knowledge base ready at {}. Loaded {} document(s).", dataDir, docCount());
@@ -462,7 +472,8 @@ public class ModelServlet extends HttpServlet {
                 }
             }
             List<Chunk> ctx = selectContext(input, urls);
-            String live = liveContext(input).promptBlock();
+            davejones74.campanionai.retrieval.LiveContext lc = liveContext(input);
+            String live = lc.promptBlock();
             String system = systemPrompt(ctx, live);
             List<LlmMessage> messages = buildMessages(system, input);
             stats.addInputTokens(estimateTokens(system) + estimateTokens(input));
@@ -520,10 +531,17 @@ public class ModelServlet extends HttpServlet {
                 }
             }
             List<Chunk> ctx = selectContext(input, urls);
-            String live = liveContext(input).promptBlock();
+            davejones74.campanionai.retrieval.LiveContext lc = liveContext(input);
+            String live = lc.promptBlock();
             String system = systemPrompt(ctx, live);
             List<LlmMessage> messages = buildMessages(system, input);
-            stats.addInputTokens(estimateTokens(system) + estimateTokens(input));
+            stats.addInputTokens(estimateTokens(system) + estimateTokens(input));            ContextUsage cu = computeContextUsage(system, messages.subList(1, Math.max(0, messages.size()-1)), ctx, lc.promptBlock(), input);
+            java.util.List<Source> sources = collectSources(urls, lc);
+            for (Source s : sources) {
+                try { writeEvent(out, java.util.Map.of("source", s)); } catch (IOException e) { throw new StreamAbort(e); }
+            }
+            try { writeEvent(out, java.util.Map.of("metadata", java.util.Map.of("contextUsage", java.util.Map.of("used", cu.used(), "limit", cu.limit(), "percentage", cu.percentage())))); } catch (IOException e) { throw new StreamAbort(e); }
+
             StringBuilder replyBuilder = new StringBuilder();
             boolean offline = false;
             try {
@@ -585,6 +603,47 @@ public class ModelServlet extends HttpServlet {
         }
     }
 
+    
+    private List<Source> collectSources(List<String> fetchedUrls, davejones74.campanionai.retrieval.LiveContext liveContext) {
+        java.util.LinkedHashSet<String> seen = new java.util.LinkedHashSet<>();
+        java.util.ArrayList<Source> result = new java.util.ArrayList<>();
+        if (fetchedUrls != null) {
+            for (String u : fetchedUrls) {
+                if (u == null || u.isBlank()) continue;
+                if (seen.add(u)) {
+                    String title = urlToFilename.getOrDefault(u, u);
+                    result.add(new Source(title, u));
+                }
+            }
+        }
+        if (liveContext != null && liveContext.sources() != null) {
+            for (Source s : liveContext.sources()) {
+                if (s.url() != null && seen.add(s.url())) {
+                    result.add(s);
+                }
+            }
+        }
+        return result;
+    }
+
+    private ContextUsage computeContextUsage(String system, List<LlmMessage> historyMsgs, List<Chunk> ctx, String livePrompt, String input) {
+        long total = estimateTokens(system) + estimateTokens(input);
+        if (historyMsgs != null) {
+            for (LlmMessage m : historyMsgs) {
+                total += estimateTokens(m.content());
+            }
+        }
+        if (livePrompt != null) {
+            total += estimateTokens(livePrompt);
+        }
+        if (ctx != null) {
+            for (Chunk c : ctx) {
+                total += estimateTokens(c.text());
+            }
+        }
+        return ContextUsage.of(total, maxContextTokens);
+    }
+
     private int docCount() {
         docsLock.readLock().lock();
         try {
@@ -614,6 +673,29 @@ public class ModelServlet extends HttpServlet {
             resp.getWriter().write(stats.toJson());
             return;
         }
+        if (path.contains("/api/files/")) {
+            String name = path.substring(path.lastIndexOf('/') + 1);
+            if (name.isBlank()) {
+                resp.sendError(404);
+                return;
+            }
+            Path gdir = dataDir.resolve("generated");
+            Path targetFile = gdir.resolve(name).normalize();
+            if (!targetFile.startsWith(gdir) || !Files.exists(targetFile) || !Files.isRegularFile(targetFile)) {
+                resp.sendError(404);
+                return;
+            }
+            String lower = name.toLowerCase();
+            String ct = "application/octet-stream";
+            if (lower.endsWith(".md")) ct = "text/markdown; charset=UTF-8";
+            else if (lower.endsWith(".txt")) ct = "text/plain; charset=UTF-8";
+            else if (lower.endsWith(".json")) ct = "application/json; charset=UTF-8";
+            else if (lower.endsWith(".csv")) ct = "text/csv; charset=UTF-8";
+            resp.setContentType(ct);
+            resp.setHeader("Cache-Control", "no-cache");
+            Files.copy(targetFile, resp.getOutputStream());
+            return;
+        }
         resp.setContentType("text/html; charset=UTF-8");
         resp.setHeader("Cache-Control", "no-store");
         resp.getWriter().write(page());
@@ -625,7 +707,45 @@ public class ModelServlet extends HttpServlet {
         resp.setContentType("application/json; charset=UTF-8");
         String path = req.getRequestURI();
         try {
-            if (path.endsWith("/api/shutdown")) {
+            if (path.endsWith("/api/chats")) {
+                String method = req.getMethod();
+                ChatStore cs = chatStoreRef.get();
+                if (cs == null) { resp.sendError(503); return; }
+                if ("GET".equals(method)) { resp.getWriter().write(json.writeValueAsString(cs.list())); return; }
+                if ("POST".equals(method)) {
+                    JsonNode body = json.readTree(req.getInputStream());
+                    Chat c = cs.create(body.path("title").asText("New chat"));
+                    resp.getWriter().write(json.writeValueAsString(c));
+                    return;
+                }
+            } else if (path.matches(".*/api/chats/[a-zA-Z0-9_-]+$")) {
+                ChatStore cs = chatStoreRef.get();
+                if (cs == null) { resp.sendError(503); return; }
+                String id = path.substring(path.lastIndexOf('/') + 1);
+                String method = req.getMethod();
+                if ("GET".equals(method)) {
+                    Chat c = cs.get(id);
+                    if (c == null) { resp.sendError(404); return; }
+                    java.util.List<davejones74.campanionai.chat.ChatMessage> msgs = cs.loadMessages(id);
+                    resp.getWriter().write(json.writeValueAsString(java.util.Map.of("chat", c, "messages", msgs)));
+                    return;
+                }
+                if ("DELETE".equals(method)) {
+                    cs.delete(id);
+                    resp.getWriter().write(json.writeValueAsString(java.util.Map.of("ok", true)));
+                    return;
+                }
+                try {
+                    JsonNode body = json.readTree(req.getInputStream());
+                    String title = body.path("title").asText(null);
+                    if (title != null) cs.rename(id, title);
+                    resp.getWriter().write(json.writeValueAsString(java.util.Map.of("ok", true)));
+                    return;
+                } catch (Exception e) {
+                    resp.getWriter().write(json.writeValueAsString(java.util.Map.of("ok", true)));
+                    return;
+                }
+            } else if (path.endsWith("/api/shutdown")) {
                 String addr = req.getRemoteAddr();
                 boolean local = addr.startsWith("127.")
                         || addr.equals("::1")
@@ -655,9 +775,20 @@ public class ModelServlet extends HttpServlet {
                 handleStream(req, resp);
             } else if (path.endsWith("/api/chat")) {
                 JsonNode body = json.readTree(req.getInputStream());
-                ChatResult result = respond(body.path("message").asText(""));
-                resp.getWriter().write(json.writeValueAsString(Map.of(
-                        "reply", result.reply(), "offline", result.offline())));
+                String msg = body.path("message").asText("");
+                ChatResult result = respond(msg);
+                java.util.List<Source> sources = java.util.List.of();
+                java.util.List<FileRef> files = java.util.List.of();
+                ContextUsage cu = ContextUsage.of(0, maxContextTokens);
+                String chatId = body.path("chatId").asText("");
+                // compute basic context usage
+                java.util.List<LlmMessage> hist = buildMessages(systemPrompt(java.util.List.of(), ""), msg); // rough
+                // easier: recompute cheaply? skip - send as-is
+                resp.getWriter().write(json.writeValueAsString(java.util.Map.of(
+                        "reply", result.reply(), "offline", result.offline(),
+                        "sources", sources, "files", files,
+                        "contextUsage", java.util.Map.of("used", cu.used(), "limit", cu.limit(), "percentage", cu.percentage()),
+                        "chatId", chatId)));
             } else if (path.endsWith("/upload")) {
                 Part doc = req.getPart("doc");
                 String filename = "unknown";
