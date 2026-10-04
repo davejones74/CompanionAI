@@ -776,14 +776,16 @@ public class ModelServlet extends HttpServlet {
             } else if (path.endsWith("/api/chat")) {
                 JsonNode body = json.readTree(req.getInputStream());
                 String msg = body.path("message").asText("");
-                ChatResult result = respond(msg);
-                java.util.List<Source> sources = java.util.List.of();
+                java.util.List<String> urls = findUrls(msg);
+                java.util.List<Chunk> ctx = selectContext(msg, urls);
+                davejones74.campanionai.retrieval.LiveContext lc = liveContext(msg);
+                String system = systemPrompt(ctx, lc.promptBlock());
+                java.util.List<LlmMessage> msgs = buildMessages(system, msg);
+                ContextUsage cu = computeContextUsage(system, msgs.subList(1, Math.max(0, msgs.size()-1)), ctx, lc.promptBlock(), msg);
+                java.util.List<Source> sources = collectSources(urls, lc);
                 java.util.List<FileRef> files = java.util.List.of();
-                ContextUsage cu = ContextUsage.of(0, maxContextTokens);
                 String chatId = body.path("chatId").asText("");
-                // compute basic context usage
-                java.util.List<LlmMessage> hist = buildMessages(systemPrompt(java.util.List.of(), ""), msg); // rough
-                // easier: recompute cheaply? skip - send as-is
+                ChatResult result = respond(msg);
                 resp.getWriter().write(json.writeValueAsString(java.util.Map.of(
                         "reply", result.reply(), "offline", result.offline(),
                         "sources", sources, "files", files,
@@ -1556,6 +1558,18 @@ async function send() {
           if (data.error) throw new Error(data.error);
           if (data.status && thinkEl) thinkEl.firstElementChild.textContent = data.status;
           if (data.offline) offline = true;
+                    if (data.source) {
+            appendSource(data.source);
+          }
+          if (data.metadata && data.metadata.contextUsage) {
+            updateContext(data.metadata.contextUsage);
+          }
+          if (data.files) {
+            for (const f of data.files) appendFile(f);
+          }
+          if (data.file) {
+            appendFile(data.file);
+          }
           if (data.delta) {
             acc += data.delta;
             if (!bubble) {
@@ -1571,25 +1585,7 @@ async function send() {
             }
             inner.innerHTML = mdRender(acc);
             await new Promise(r => requestAnimationFrame(() => r()));
-          }
-        }
-      }
-    }
-    buf += decoder.decode();
-    if (bubble) {
-      if (offline) {
-        const tag = document.createElement('span');
-        tag.className = 'offline-tag';
-        tag.textContent = 'offline reply';
-        inner.appendChild(tag);
-      }
-      beep('answer');
-      chatLog.scrollTo({ top: chatLog.scrollHeight, behavior: 'smooth' });
-    } else {
-      if (thinkEl) thinkEl.remove();
-      addMsg('assistant', '(The model returned an empty reply.)');
-    }
-  } catch (e) {
+          }} catch (e) {
     if (thinkEl) thinkEl.remove();
     if (bubble) bubble.remove();
     addMsg('assistant', 'Sorry, something went wrong: ' + e.message);
