@@ -30,6 +30,35 @@ public final class RuleIntentClassifier implements IntentClassifier {
             "news", "headlines", "headline", "announcement", "announced", "developments",
             "latest");
 
+    /**
+     * Explicit search requests. Matched on word boundaries.
+     *
+     * <p>Distinct from {@link #WEB_WORDS}, which is a substring test kept for compatibility
+     * because it is what shipped. A substring test is wrong for search verbs: "research" sits
+     * inside "researcher", and "browse" inside "browsing history".
+     */
+    private static final Set<String> SEARCH_WORDS = Set.of(
+            "search", "searched", "searching", "browse", "browsing", "google", "research",
+            "lookup", "look up", "investigating", "investigate");
+
+    /**
+     * Requests for a sweep rather than a single answer. These select the research profile, and
+     * they also indicate a web lookup is wanted at all, since "list all the articles about X"
+     * names no keyword that the older word list recognised.
+     *
+     * <p>Every entry either names a unit of content ("stories", "articles", "posts") or is an
+     * intensifier that only appears when a sweep is meant ("exhaustive", "complete"). Bare
+     * quantifiers are deliberately absent, because they occur far more often in ordinary
+     * conversation than in a search request: treating "thanks, that's all" or "that covers
+     * everything" as a research request spent three searches answering a sign-off. A message
+     * built only from such a word is genuinely ambiguous, and letting it fall through to the
+     * LLM classifier is both cheaper and safer than guessing a sweep here.
+     */
+    private static final Set<String> RESEARCH_WORDS = Set.of(
+            "entire", "exhaustive", "comprehensive", "complete", "coverage", "roundup",
+            "story", "stories", "article", "articles", "piece", "pieces",
+            "post", "posts", "video", "videos", "published");
+
     private static final Set<String> LEAGUES = Set.of(
             "premier league", "championship", "la liga", "serie a", "bundesliga", "ligue 1");
 
@@ -43,12 +72,21 @@ public final class RuleIntentClassifier implements IntentClassifier {
             "good afternoon", "good evening", "how are you", "what can you do",
             "who are you", "goodbye", "bye", "help me");
 
+    /**
+     * A URL the user pasted. It is removed before any web wording is matched, because a path like
+     * {@code /articles/2026/09/story} would otherwise read as a request for a sweep of articles.
+     * The page itself is fetched by the caller; the topic is whatever the surrounding prose says.
+     */
+    private static final java.util.regex.Pattern URL =
+            java.util.regex.Pattern.compile("https?://\\S+");
+
     @Override
     public Optional<IntentClassification> classify(String input, List<LlmMessage> history) {
         if (input == null || input.isBlank()) {
             return Optional.empty();
         }
         String s = input.toLowerCase(Locale.ROOT);
+        String topic = URL.matcher(s).replaceAll(" ");
         int pastDays = 0;
         if (s.contains("yesterday")) {
             pastDays = 1;
@@ -83,8 +121,20 @@ public final class RuleIntentClassifier implements IntentClassifier {
         }
 
         for (String w : WEB_WORDS) {
-            if (s.contains(w)) {
-                return Optional.of(new IntentClassification(Intent.WEB_SEARCH, location(s), null, 0));
+            if (topic.contains(w)) {
+                return Optional.of(new IntentClassification(Intent.WEB_SEARCH, location(topic), null, 0));
+            }
+        }
+        // Boundary-matched so that a hostname cannot be misread as a topic word, and so that
+        // "give me all the stories about X" is recognised without relying on the substring list.
+        for (String w : SEARCH_WORDS) {
+            if (hasWord(topic, w)) {
+                return Optional.of(new IntentClassification(Intent.WEB_SEARCH, location(topic), null, 0));
+            }
+        }
+        for (String w : RESEARCH_WORDS) {
+            if (hasWord(topic, w)) {
+                return Optional.of(new IntentClassification(Intent.WEB_SEARCH, location(topic), null, 0));
             }
         }
         for (String w : CONVERSATIONAL) {

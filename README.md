@@ -188,10 +188,44 @@ The legacy keys below still work unchanged for Ollama.
 | `campanionai.searchApiKey` | `''`      | Tavily API key (web search) — unset ⇒ web search off     |
 | `campanionai.sportsApiKey` | `''`      | API-Football key (football data) — unset ⇒ sports off    |
 | `campanionai.live.defaultLocation` | `''` | Default weather location (e.g. `Uxbridge, UK`)           |
-| `campanionai.live.webResults` | `5`      | Max web search results per query                          |
-| `campanionai.live.fetchPages` | `2`      | Max live web pages to fetch per search                    |
+| `campanionai.live.webResults` | `5`      | Lookup: max web search results per query                     |
+| `campanionai.live.fetchPages` | `2`      | Lookup: max live web pages to fetch per request               |
+| `campanionai.live.searchDepth` | `basic` | Lookup: Tavily `search_depth` (`basic` or `advanced`)        |
+| `campanionai.live.webTopic` | `news`    | Lookup: Tavily `topic`                                        |
+| `campanionai.live.webTimeRange` | `week` | Lookup: Tavily `time_range` (`day`, `week`, `month`, `year`)  |
+| `campanionai.live.web.searchUrl` | Tavily | Tavily endpoint; override to point at a proxy or a stub       |
+| `campanionai.live.web.researchResults` | `20` | Research: max results per query                           |
+| `campanionai.live.web.researchFetchPages` | `6` | Research: max pages fetched per request              |
+| `campanionai.live.web.researchQueries` | `3`  | Research: queries per request (capped at 3)                  |
+| `campanionai.live.web.researchSearchDepth` | `advanced` | Research: Tavily `search_depth`                     |
+| `campanionai.live.web.researchTopic` | `general` | Research: Tavily `topic`                                  |
+| `campanionai.live.web.researchTimeRange` | `''` | Research: Tavily `time_range`; empty sends none             |
 | `campanionai.live.contextTokens` | `4000` | Token budget for injected live content                   |
 | `campanionai.sports.maxRequestsPerDay` | `100` | API-Football daily request cap                        |
+
+### Lookup and Research
+
+A request runs in one of two modes, and the mode is chosen from the wording rather than from a
+setting:
+
+- **Lookup** is the default for a pointed question ("what is the latest news on AI models?"). One
+  cheap `basic` search, recent news, five results, two pages fetched in full.
+- **Research** is selected by wording that asks for a sweep — "all the stories", "every article",
+  "complete coverage", "roundup". Up to three `advanced` searches, twenty results, six pages
+  fetched. The queries are a deterministic function of the request (the request itself, the
+  request reduced to its subject, and the subject plus `site:`), not model generated, so the cost
+  of a request is knowable in advance.
+
+Naming a bare hostname scopes the search to that site: "bbc.co.uk - give me all the stories about
+Huw Edwards" sends `include_domains: ["bbc.co.uk"]`, and results are filtered to that host and its
+subdomains before they reach the prompt. The hostname is kept exactly as written — `news.bbc.co.uk`
+is not widened to `bbc.co.uk` — and a URL that already has a scheme (`https://...`) is still fetched
+directly rather than treated as a scope.
+
+Few results is never a reason to widen the scope. The prompt states the scope and the count
+("I found 18 matching pages across the 3 searches I ran on bbc.co.uk") and tells the model to
+report absence of evidence as absence of evidence: these searches found nothing, which is not proof
+that the site has no such pages.
 
 Examples:
 

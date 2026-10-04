@@ -98,6 +98,36 @@ class RuleIntentClassifierTest {
     }
 
     @Test
+    void researchWordingReachesWebSearch() {
+        assertEquals(Intent.WEB_SEARCH,
+                classify("bbc.co.uk - give me all the stories about Huw Edwards").intent());
+        assertEquals(Intent.WEB_SEARCH,
+                classify("list every article from the site about Huw Edwards").intent());
+        assertEquals(Intent.WEB_SEARCH,
+                classify("find me everything bbc.co.uk published about Huw Edwards").intent());
+        assertEquals(Intent.WEB_SEARCH,
+                classify("compile a full list of stories about Huw Edwards").intent());
+    }
+
+    @Test
+    void researchWordingIsNotFooledBySubstrings() {
+        // Research markers are matched on word boundaries. "football" contains the letters of
+        // "all", and a substring test would sweep the web for a match result question.
+        assertEquals(Intent.SPORTS,
+                classify("how did Manchester United get on at the weekend?").intent());
+        assertEquals(Intent.SPORTS,
+                classify("what was the final score for Chelsea tonight?").intent());
+        assertEquals(Intent.WEATHER, classify("will it rain tomorrow morning?").intent());
+    }
+
+    @Test
+    void researchWordingIsNotConfusedWithAGreeting() {
+        assertEquals(Intent.NONE, classify("hello there").intent());
+        assertEquals(Intent.NONE, classify("thanks, that's all").intent());
+        assertEquals(Intent.NONE, classify("that covers everything, goodbye").intent());
+    }
+
+    @Test
     void knowledgeBaseQuestions() {
         IntentClassification c = classify("summarise what I uploaded earlier");
         assertEquals(Intent.KNOWLEDGE_BASE, c.intent());

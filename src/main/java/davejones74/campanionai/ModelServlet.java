@@ -45,6 +45,7 @@ import davejones74.campanionai.retrieval.RuleIntentClassifier;
 import davejones74.campanionai.retrieval.SportsProvider;
 import davejones74.campanionai.retrieval.WeatherProvider;
 import davejones74.campanionai.retrieval.WebSearchProvider;
+import davejones74.campanionai.retrieval.WebSearchProfileSettings;
 import davejones74.campanionai.chat.Chat;
 import davejones74.campanionai.chat.ChatMessage;
 import davejones74.campanionai.chat.ChatStore;
@@ -91,8 +92,34 @@ public class ModelServlet extends HttpServlet {
             "campanionai.live.webResults", "COMPANIONAI_LIVE_WEB_RESULTS", 5);
     private final int liveFetchPages = Config.integer(
             "campanionai.live.fetchPages", "COMPANIONAI_LIVE_FETCH_PAGES", 2);
+    private final String liveSearchDepth = Config.string(
+            "campanionai.live.searchDepth", "COMPANIONAI_LIVE_SEARCH_DEPTH", "basic");
+    private final String liveTopic = Config.string(
+            "campanionai.live.webTopic", "COMPANIONAI_LIVE_WEB_TOPIC", "news");
+    private final String liveTimeRange = Config.string(
+            "campanionai.live.webTimeRange", "COMPANIONAI_LIVE_WEB_TIME_RANGE", "week");
+    private final String liveSearchUrl = Config.string(
+            "campanionai.live.web.searchUrl", "COMPANIONAI_LIVE_WEB_SEARCH_URL", "");
     private final int liveContextTokens = Config.integer(
             "campanionai.live.contextTokens", "COMPANIONAI_LIVE_CONTEXT_TOKENS", 4000);
+
+    /**
+     * Research-mode budget. These are separate from the lookup budget above rather than raised
+     * versions of it, so that asking a pointed question keeps costing a single cheap search.
+     */
+    private final int liveResearchResults = Config.integer(
+            "campanionai.live.web.researchResults", "COMPANIONAI_LIVE_WEB_RESEARCH_RESULTS", 20);
+    private final int liveResearchFetchPages = Config.integer(
+            "campanionai.live.web.researchFetchPages", "COMPANIONAI_LIVE_WEB_RESEARCH_FETCH_PAGES", 6);
+    private final int liveResearchQueries = Config.integer(
+            "campanionai.live.web.researchQueries", "COMPANIONAI_LIVE_WEB_RESEARCH_QUERIES", 3);
+    private final String liveResearchDepth = Config.string(
+            "campanionai.live.web.researchSearchDepth", "COMPANIONAI_LIVE_WEB_RESEARCH_SEARCH_DEPTH", "advanced");
+    private final String liveResearchTopic = Config.string(
+            "campanionai.live.web.researchTopic", "COMPANIONAI_LIVE_WEB_RESEARCH_TOPIC", "general");
+    private final String liveResearchTimeRange = Config.string(
+            "campanionai.live.web.researchTimeRange", "COMPANIONAI_LIVE_WEB_RESEARCH_TIME_RANGE", "");
+    private static final int LIVE_LOOKUP_QUERIES = 1;
     private final int sportsMaxPerDay = Config.integer(
             "campanionai.sports.maxRequestsPerDay", "COMPANIONAI_SPORTS_MAX_REQUESTS_PER_DAY", 100);
 
@@ -120,7 +147,14 @@ public class ModelServlet extends HttpServlet {
     private record ChunkScore(Chunk chunk, int score) {
     }
 
-    private record ChatResult(String reply, boolean offline) {}    private final java.util.concurrent.atomic.AtomicReference<davejones74.campanionai.chat.ChatStore> chatStoreRef = new java.util.concurrent.atomic.AtomicReference<>();
+    private record ChatResult(String reply, boolean offline, java.util.List<Source> sources,
+                              java.util.List<FileRef> files, ContextUsage usage) {
+
+        ChatResult(String reply, boolean offline) {
+            this(reply, offline, List.of(), List.of(), ContextUsage.of(0, 1));
+        }
+    }
+    private final java.util.concurrent.atomic.AtomicReference<davejones74.campanionai.chat.ChatStore> chatStoreRef = new java.util.concurrent.atomic.AtomicReference<>();
     private final java.util.concurrent.atomic.AtomicReference<davejones74.campanionai.chat.ToolExecutor> toolExecutorRef = new java.util.concurrent.atomic.AtomicReference<>();
 
     @Override
@@ -148,8 +182,14 @@ public class ModelServlet extends HttpServlet {
         Map<RetrievalKind, RetrievalProvider> providers = new EnumMap<>(RetrievalKind.class);
         providers.put(RetrievalKind.WEATHER, new WeatherProvider());
         if (searchApiKey != null && !searchApiKey.isBlank()) {
+            WebSearchProfileSettings lookup = new WebSearchProfileSettings(
+                    liveWebResults, liveFetchPages, LIVE_LOOKUP_QUERIES,
+                    liveSearchDepth, liveTopic, liveTimeRange);
+            WebSearchProfileSettings research = new WebSearchProfileSettings(
+                    liveResearchResults, liveResearchFetchPages, liveResearchQueries,
+                    liveResearchDepth, liveResearchTopic, liveResearchTimeRange);
             providers.put(RetrievalKind.WEB_SEARCH,
-                    new WebSearchProvider(searchApiKey, fetcher, liveWebResults, liveFetchPages));
+                    new WebSearchProvider(searchApiKey, fetcher, lookup, research, liveSearchUrl));
         }
         if (sportsApiKey != null && !sportsApiKey.isBlank()) {
             providers.put(RetrievalKind.SPORTS, new SportsProvider(sportsApiKey, sportsMaxPerDay));
@@ -159,11 +199,17 @@ public class ModelServlet extends HttpServlet {
     }
 
     private davejones74.campanionai.retrieval.LiveContext liveContext(String input) {
+        return liveContext(input, davejones74.campanionai.retrieval.RetrievalProgress.NOOP);
+    }
+
+    private davejones74.campanionai.retrieval.LiveContext liveContext(
+            String input, davejones74.campanionai.retrieval.RetrievalProgress progress) {
         if (retrieval == null) {
             return davejones74.campanionai.retrieval.LiveContext.empty();
         }
         synchronized (history) {
-            davejones74.campanionai.retrieval.LiveContext lc = retrieval.supplement(input, new ArrayList<>(history));
+            davejones74.campanionai.retrieval.LiveContext lc =
+                    retrieval.supplement(input, new ArrayList<>(history), progress);
             if (lc.attempted()) stats.recordLiveAttempt();
             if (lc.failed()) stats.recordLiveFailure();
             return lc;
@@ -557,6 +603,9 @@ public class ModelServlet extends HttpServlet {
             String live = lc.promptBlock();
             String system = systemPrompt(ctx, live);
             List<LlmMessage> messages = buildChatMessages(chatStoreRef.get(), history, system, input, chatId, historyTokens, maxHistoryMessages);
+            ContextUsage cu = computeContextUsage(system, messages.subList(1, Math.max(0, messages.size() - 1)),
+                    ctx, live, input);
+            List<Source> sources = collectSources(urls, lc);
             stats.addInputTokens(estimateTokens(system) + estimateTokens(input));
             java.util.List<LlmMessage> chatMessages = planFiles(messages, generatedFiles);
             String reply;
@@ -571,16 +620,17 @@ public class ModelServlet extends HttpServlet {
             if (chatId == null || chatId.isBlank()) {
                 appendHistory(input, reply);
             }
-            return new ChatResult(reply, false);
+            return new ChatResult(reply, false, sources, List.copyOf(generatedFiles), cu);
         } catch (LlmException e) {
             stats.recordOffline();
             String fallback = chat.reply(input);
             if (fallback != null) {
                 String reply = fallback + "\n\n[LLM unavailable - offline reply]";
                 appendHistory(input, reply);
-                return new ChatResult(reply, true);
+                return new ChatResult(reply, true, List.of(), List.of(), ContextUsage.of(0, 1));
             }
-            return new ChatResult("I couldn't reach the language model right now: " + e.getMessage(), true);
+            return new ChatResult("I couldn't reach the language model right now: " + e.getMessage(),
+                    true, List.of(), List.of(), ContextUsage.of(0, 1));
         }
     }
 
@@ -622,7 +672,9 @@ public class ModelServlet extends HttpServlet {
                 }
             }
             List<Chunk> ctx = selectContext(input, urls);
-            davejones74.campanionai.retrieval.LiveContext lc = liveContext(input);
+            davejones74.campanionai.retrieval.LiveContext lc = liveContext(input, status -> {
+                try { writeEvent(out, Map.of("status", status)); } catch (IOException e) { throw new StreamAbort(e); }
+            });
             String live = lc.promptBlock();
             String system = systemPrompt(ctx, live);
             java.util.List<LlmMessage> messages = buildChatMessages(chatStoreRef.get(), history, system, input, chatId, historyTokens, maxHistoryMessages);
@@ -992,15 +1044,13 @@ public class ModelServlet extends HttpServlet {
                 JsonNode body = json.readTree(req.getInputStream());
                 String msg = body.path("message").asText("");
                 String chatId = body.path("chatId").asText("");
-                java.util.List<String> urls = findUrls(msg);
-                java.util.List<Chunk> ctx = selectContext(msg, urls);
-                davejones74.campanionai.retrieval.LiveContext lc = liveContext(msg);
-                String system = systemPrompt(ctx, lc.promptBlock());
-                java.util.List<LlmMessage> msgs = buildChatMessages(chatStoreRef.get(), history, system, msg, chatId, historyTokens, maxHistoryMessages);
-                ContextUsage cu = computeContextUsage(system, msgs.subList(1, Math.max(0, msgs.size()-1)), ctx, lc.promptBlock(), msg);
-                java.util.List<Source> sources = collectSources(urls, lc);
+                // One request assembles the context once. Computing it here and again inside
+                // respond() ran every live retrieval twice, which doubled the Tavily cost and
+                // latency of every non-streaming chat, and the outer copy was computed before the
+                // fetched URL had been added to the knowledge base, so it could not match it.
                 java.util.List<FileRef> files = new java.util.ArrayList<>();
                 ChatResult result = respond(msg, files, chatId);
+                java.util.List<Source> sources = result.sources();
                 try {
                     davejones74.campanionai.chat.ChatStore cs = chatStoreRef.get();
                     if (cs != null && chatId != null && !chatId.isBlank()) {
@@ -1013,6 +1063,7 @@ public class ModelServlet extends HttpServlet {
                     }
                 } catch (IOException ignored) {
                 }
+                ContextUsage cu = result.usage();
                 resp.getWriter().write(json.writeValueAsString(java.util.Map.of(
                         "reply", result.reply(), "offline", result.offline(),
                         "sources", sources, "files", files,
