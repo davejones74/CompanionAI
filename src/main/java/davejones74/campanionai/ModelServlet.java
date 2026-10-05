@@ -903,8 +903,16 @@ return new ChatResult("I couldn't reach the language model right now: " + e.getM
 
             java.util.List<FileRef> generatedFiles = new java.util.ArrayList<>();
             java.util.List<LlmMessage> streamMessages = planFiles(messages, generatedFiles);
-            for (FileRef f : generatedFiles) {
-                try { writeEvent(out, java.util.Map.of("file", java.util.Map.of("name", f.name(), "url", f.url(), "mimeType", f.mimeType(), "size", f.size()))); } catch (IOException e) { throw new StreamAbort(e); }
+            if (!generatedFiles.isEmpty()) {
+                // One "files" event, the same shape as the non-streaming /api/chat response.
+                // The browser's SSE parser handles data.files; per-file "file" events were
+                // silently ignored and the download link never appeared.
+                java.util.List<java.util.Map<String, Object>> filesJson = new java.util.ArrayList<>();
+                for (FileRef f : generatedFiles) {
+                    filesJson.add(java.util.Map.of(
+                            "name", f.name(), "url", f.url(), "mimeType", f.mimeType(), "size", f.size()));
+                }
+                try { writeEvent(out, java.util.Map.of("files", filesJson)); } catch (IOException e) { throw new StreamAbort(e); }
             }
 
             StringBuilder replyBuilder = new StringBuilder();

@@ -229,6 +229,78 @@ private ModelServlet servlet() throws Exception {
                 "no second LLM request may be made once content has streamed");
     }
 
+    private static String toolCallReply(String... calls) {
+        StringBuilder sb = new StringBuilder("{\"choices\":[{\"message\":{\"tool_calls\":[");
+        for (int i = 0; i < calls.length; i++) {
+            if (i > 0) {
+                sb.append(',');
+            }
+            sb.append("{\"id\":\"c").append(i).append("\",\"type\":\"function\",")
+                    .append("\"function\":{\"name\":\"create_file\",\"arguments\":\"").append(calls[i]).append("\"}}");
+        }
+        return sb.append("]}}]}").toString();
+    }
+
+    private static String createFileArgs(String filename, String content) {
+        return "{\\\"filename\\\":\\\"" + filename + "\\\",\\\"mimeType\\\":\\\"text/plain\\\","
+                + "\\\"content\\\":\\\"" + content + "\\\"}";
+    }
+
+    @Test
+    void streamEmitsTheGeneratedFileOnceWithItsDownloadInfo() throws Exception {
+        llm.chatJson(toolCallReply(createFileArgs("cities.txt", "London, York")));
+        llm.chatStreamSse("{\"choices\":[{\"delta\":{\"content\":\"Here is your file.\"}}]}",
+                "{\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}", "[DONE]");
+        ModelServlet servlet = servlet();
+        int requestsBefore = llm.requests();
+
+        Response out = post(servlet, "/api/chat/stream",
+                "{\"message\":\"create a text file listing cities in England\"}");
+
+        assertEquals(200, out.status, out.body);
+        assertTrue(Files.exists(dataDir.resolve("generated").resolve("cities.txt")),
+                "create_file must still write the physical file");
+        assertTrue(out.body.contains("Here is your file."), out.body);
+        assertTrue(out.body.contains("\"files\":[{"), out.body);
+        assertTrue(out.body.contains("\"name\":\"cities.txt\""), out.body);
+        assertTrue(out.body.contains("\"url\":\"/api/files/cities.txt\""), out.body);
+        assertTrue(out.body.contains("\"mimeType\":\"text/plain\""), out.body);
+        assertEquals(out.body.indexOf("\"files\""), out.body.lastIndexOf("\"files\""),
+                "the files event must be emitted exactly once: " + out.body);
+        assertEquals(2, llm.requests() - requestsBefore,
+                "one tool-planning request plus one streaming request");
+    }
+
+    @Test
+    void streamEmitsEveryGeneratedFile() throws Exception {
+        llm.chatJson(toolCallReply(
+                createFileArgs("cities.txt", "London"),
+                createFileArgs("towns.csv", "Windsor"),
+                createFileArgs("notes.md", "# Notes")));
+        llm.chatStreamSse("{\"choices\":[{\"delta\":{\"content\":\"Three files created.\"}}]}",
+                "[DONE]");
+
+        Response out = post(servlet(), "/api/chat/stream",
+                "{\"message\":\"create a text file, a csv file and a markdown file\"}");
+
+        assertEquals(200, out.status, out.body);
+        for (String name : List.of("cities.txt", "towns.csv", "notes.md")) {
+            assertTrue(Files.exists(dataDir.resolve("generated").resolve(name)), name);
+            assertTrue(out.body.contains("\"name\":\"" + name + "\""), out.body);
+        }
+    }
+
+    @Test
+    void aNormalStreamWithoutFilesEmitsNoFilesEvent() throws Exception {
+        llm.chatSse("{\"choices\":[{\"delta\":{\"content\":\"Just a reply.\"}}]}", "[DONE]");
+
+        Response out = post(servlet(), "/api/chat/stream", "{\"message\":\"hello there\"}");
+
+        assertEquals(200, out.status, out.body);
+        assertTrue(out.body.contains("Just a reply."), out.body);
+        assertFalse(out.body.contains("\"files\""), out.body);
+    }
+
     private String searchUrl(String path) {
         return "http://127.0.0.1:" + search.getAddress().getPort() + path;
     }

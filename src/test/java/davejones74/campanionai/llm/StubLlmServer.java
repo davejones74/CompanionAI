@@ -35,6 +35,7 @@ public final class StubLlmServer implements AutoCloseable {
     private final AtomicInteger requestCount = new AtomicInteger();
 
     private volatile Reply chat = Reply.sse("{\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}", "[DONE]");
+    private volatile Reply chatStream = null;
     private volatile Reply models = Reply.json("{\"data\":[{\"id\":\"model-a\"},{\"id\":\"model-b\"}]}");
 
     public StubLlmServer() throws IOException {
@@ -50,6 +51,15 @@ public final class StubLlmServer implements AutoCloseable {
     /** Streams {@code data:} frames, as a standards-compliant server would. */
     public void chatSse(String... frames) {
         chat = Reply.sse(frames);
+    }
+
+    /**
+     * Replies with these frames only to requests whose body carries {@code "stream":true}.
+     * Lets a test answer the non-streaming tool-planning request with a tool call and the
+     * streaming follow-up with deltas, which a single shared reply cannot express.
+     */
+    public void chatStreamSse(String... frames) {
+        chatStream = Reply.sse(frames);
     }
 
     /** Streams bare newline-delimited JSON, with no SSE framing at all. */
@@ -98,7 +108,9 @@ public final class StubLlmServer implements AutoCloseable {
 
         String path = exchange.getRequestURI().getPath();
         lastPath.set(path);
-        Reply reply = path.endsWith("/models") ? models : chat;
+        Reply reply = path.endsWith("/models") ? models
+                : chatStream != null && lastBody.get().contains("\"stream\":true") ? chatStream
+                : chat;
 
         exchange.getResponseHeaders().set("Content-Type", reply.contentType());
         if (reply.chunked()) {
