@@ -37,10 +37,18 @@ public final class OllamaProvider implements LlmProvider {
     private final String model;
     private final double temperature;
     private final Integer numCtx;
+    private final int maxTokens;
     private final OpenAiCompatTransport transport;
 
     public OllamaProvider(String model, String baseUrl, double temperature, Integer numCtx) {
-        this(model, baseUrl, temperature, numCtx, new OpenAiCompatTransport(baseUrl, "Ollama"));
+        this(model, baseUrl, temperature, numCtx, LlmProviderFactory.DEFAULT_MAX_TOKENS,
+                new OpenAiCompatTransport(baseUrl, "Ollama"));
+    }
+
+    public OllamaProvider(String model, String baseUrl, double temperature, Integer numCtx,
+                          int maxTokens) {
+        this(model, baseUrl, temperature, numCtx, maxTokens,
+                new OpenAiCompatTransport(baseUrl, "Ollama"));
     }
 
     public OllamaProvider(String model,
@@ -48,9 +56,19 @@ public final class OllamaProvider implements LlmProvider {
                           double temperature,
                           Integer numCtx,
                           OpenAiCompatTransport transport) {
+        this(model, baseUrl, temperature, numCtx, LlmProviderFactory.DEFAULT_MAX_TOKENS, transport);
+    }
+
+    public OllamaProvider(String model,
+                          String baseUrl,
+                          double temperature,
+                          Integer numCtx,
+                          int maxTokens,
+                          OpenAiCompatTransport transport) {
         this.model = model;
         this.temperature = temperature;
         this.numCtx = numCtx;
+        this.maxTokens = maxTokens;
         this.transport = transport;
     }
 
@@ -72,6 +90,11 @@ public final class OllamaProvider implements LlmProvider {
     @Override
     public double temperature() {
         return temperature;
+    }
+
+    @Override
+    public int maxTokens() {
+        return maxTokens;
     }
 
     @Override
@@ -111,7 +134,7 @@ public final class OllamaProvider implements LlmProvider {
     private ObjectNode body(List<LlmMessage> messages, boolean stream,
                             java.util.List<com.fasterxml.jackson.databind.JsonNode> tools) {
         ObjectNode node = OpenAiChat.envelope(
-                transport.mapper(), model, messages, temperature, stream, tools);
+                transport.mapper(), model, messages, temperature, stream, tools, maxTokens);
         if (numCtx != null) {
             node.set("options", transport.mapper().createObjectNode().put("num_ctx", numCtx));
         }

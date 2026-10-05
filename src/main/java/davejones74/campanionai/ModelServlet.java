@@ -37,6 +37,7 @@ import davejones74.campanionai.llm.LlmMessage;
 import davejones74.campanionai.llm.LlmProvider;
 import davejones74.campanionai.llm.LlmProviderFactory;
 import davejones74.campanionai.llm.LlmCapability;
+import davejones74.campanionai.llm.StreamCompletion;
 import davejones74.campanionai.retrieval.LlmIntentClassifier;
 import davejones74.campanionai.retrieval.RetrievalKind;
 import davejones74.campanionai.retrieval.RetrievalProvider;
@@ -908,7 +909,12 @@ return new ChatResult("I couldn't reach the language model right now: " + e.getM
 
             StringBuilder replyBuilder = new StringBuilder();
             boolean offline = false;
+            boolean interrupted = false;
+            boolean truncated = false;
             CloudAnswer cloudAnswer = null;
+            java.util.concurrent.atomic.AtomicReference<StreamCompletion> completion =
+                    new java.util.concurrent.atomic.AtomicReference<>();
+            LOG.info("[LLM] model={} maxTokens={}", llm.model(), llm.maxTokens());
             try {
                 llm.chatStream(streamMessages, new LlmProvider.ChunkHandler() {
                     @Override
@@ -931,18 +937,38 @@ return new ChatResult("I couldn't reach the language model right now: " + e.getM
                             throw new StreamAbort(e);
                         }
                     }
+
+                    @Override
+                    public void onComplete(StreamCompletion c) {
+                        completion.set(c);
+                    }
                 });
+                StreamCompletion sc = completion.get();
+                String finishReason = sc == null ? null : sc.finishReason();
+                if (sc != null && sc.reachedOutputLimit()) {
+                    truncated = true;
+                    LOG.info("[LLM] Stream reached max token limit: {}", llm.maxTokens());
+                } else if (sc != null && sc.cancelled()) {
+                    interrupted = true;
+                    LOG.warn("[LLM] Stream cancelled by the runtime after {} character(s).",
+                            replyBuilder.length());
+                } else {
+                    LOG.info("[LLM] Stream completed normally ({} characters, finish_reason={}).",
+                            replyBuilder.length(), finishReason == null ? "unsent" : finishReason);
+                }
             } catch (StreamAbort e) {
-                LOG.debug("Stream aborted (client disconnected).");
+                LOG.info("[LLM] Client disconnected after {} character(s) had been sent.",
+                        replyBuilder.length());
                 return;
             } catch (LlmException localFailure) {
-                LOG.warn("Local stream failed: {}", localFailure.getMessage());
+                LOG.warn("[LLM] Stream failed: {}", localFailure.getMessage());
                 if (replyBuilder.isEmpty()) {
                     // Nothing has been shown yet, so a second model can answer cleanly.
                     // Retrying after the first few tokens would splice two answers together.
                     cloudAnswer = cloudStreamReply(streamMessages, lc.profile(), live, localFailure, out);
                 } else {
-                    LOG.warn("Local stream failed after {} character(s) had been sent; "
+                    interrupted = true;
+                    LOG.warn("[LLM] Stream failed after {} character(s) had been sent; "
                             + "not retrying, to avoid splicing two answers together.", replyBuilder.length());
                 }
                 if (cloudAnswer == null && replyBuilder.isEmpty()) {
@@ -979,7 +1005,7 @@ return new ChatResult("I couldn't reach the language model right now: " + e.getM
             stats.addOutputTokens(estimateTokens(reply));
             stats.recordStreamed();
             recordLatency(t0, estimateTokens(reply));
-            writeDone(out, offline);
+            writeDone(out, offline, interrupted, truncated);
         } catch (StreamAbort e) {
             LOG.debug("Stream aborted (client disconnected).");
         } catch (Exception e) {
@@ -1084,7 +1110,17 @@ return new ChatResult("I couldn't reach the language model right now: " + e.getM
     }
 
     private void writeDone(PrintWriter out, boolean offline) throws IOException {
-        writeEvent(out, Map.of("done", true, "offline", offline));
+        writeDone(out, offline, false, false);
+    }
+
+    private void writeDone(PrintWriter out, boolean offline, boolean interrupted, boolean truncated)
+            throws IOException {
+        Map<String, Object> fields = new java.util.LinkedHashMap<>();
+        fields.put("done", true);
+        fields.put("offline", offline);
+        fields.put("interrupted", interrupted);
+        fields.put("truncated", truncated);
+        writeEvent(out, fields);
     }
 
     private static final class StreamAbort extends RuntimeException {
@@ -2395,6 +2431,8 @@ async function send() {
   let acc = '';
   let thoughtAcc = '';
   let offline = false;
+  let interrupted = false;
+  let truncated = false;
   try {
     const res = await fetch('/api/chat/stream', {
       method: 'POST',
@@ -2421,6 +2459,10 @@ async function send() {
           if (data.error) throw new Error(data.error);
           if (data.status && thinkEl) thinkEl.firstElementChild.textContent = data.status;
           if (data.offline) offline = true;
+          if (data.done) {
+            if (data.interrupted) interrupted = true;
+            if (data.truncated) truncated = true;
+          }
                     if (data.source) {
             appendSource(data.source);
           }
@@ -2472,6 +2514,7 @@ async function send() {
               inner.className = 'bubble';
               bubble.appendChild(inner);
               chatLog.appendChild(bubble);
+              beep('answer');
               chatLog.scrollTo({ top: chatLog.scrollHeight, behavior: 'smooth' });
             }
             inner.innerHTML = mdRender(acc);
@@ -2481,12 +2524,32 @@ async function send() {
         }
       }
     }
-    if (bubble && inner) addCopyButton(inner, acc);
+    if (bubble && inner) {
+      addCopyButton(inner, acc);
+      if (interrupted || truncated) {
+        const n = document.createElement('div');
+        n.className = 'notice';
+        n.textContent = truncated
+          ? 'Response truncated at the configured output limit.'
+          : 'Response interrupted before completion.';
+        bubble.appendChild(n);
+        chatLog.scrollTo({ top: chatLog.scrollHeight, behavior: 'smooth' });
+      }
+    }
   } catch (e) {
     if (thinkEl) thinkEl.remove();
-    if (bubble) bubble.remove();
-    addMsg('assistant', 'Sorry, something went wrong: ' + e.message);
-    beep('answer');
+    if (bubble && acc) {
+      // Partial content is worth more than an error message: keep it and say it stopped early.
+      const n = document.createElement('div');
+      n.className = 'notice';
+      n.textContent = 'Response interrupted before completion: ' + e.message;
+      bubble.appendChild(n);
+      if (inner) addCopyButton(inner, acc);
+    } else {
+      if (bubble) bubble.remove();
+      addMsg('assistant', 'Sorry, something went wrong: ' + e.message);
+      beep('answer');
+    }
   } finally {
     sendBtn.disabled = false;
     input.focus();

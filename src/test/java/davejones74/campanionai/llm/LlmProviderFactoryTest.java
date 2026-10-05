@@ -42,18 +42,21 @@ class LlmProviderFactoryTest {
             "companionai.llm.temperature",
             "companionai.llm.numCtx",
             "companionai.llm.think",
+            "companionai.llm.maxTokens",
             "campanionai.llm.provider",
             "campanionai.llm.model",
             "campanionai.llm.baseUrl",
             "campanionai.llm.temperature",
             "campanionai.llm.think",
+            "campanionai.llm.maxTokens",
             "campanionai.model",
             "campanionai.temperature",
             "campanionai.numCtx",
             "campanionai.ollamaUrl");
 
     private static final List<String> ENVIRONMENT_KEYS = List.of(
-            "LLM_PROVIDER", "LLM_MODEL", "LLM_BASE_URL", "LLM_TEMPERATURE", "LLM_NUM_CTX", "LLM_THINK");
+            "LLM_PROVIDER", "LLM_MODEL", "LLM_BASE_URL", "LLM_TEMPERATURE", "LLM_NUM_CTX", "LLM_THINK",
+            "LLM_MAX_TOKENS");
 
     private final Map<String, String> savedProperties = new HashMap<>();
     private final Map<String, String> savedEnvironment = new HashMap<>();
@@ -234,6 +237,47 @@ class LlmProviderFactoryTest {
 
         assertEquals(LlmProviderFactory.DEFAULT_TEMPERATURE, provider.temperature(), 1e-9);
         assertTrue(warnings().contains("Ignoring non-numeric configuration value"), warnings());
+    }
+
+    @Test
+    void defaultsMaxTokensTo1024WhenUnset() {
+        clearConfiguration();
+
+        assertEquals(1024, LlmProviderFactory.fromSystemProperties().maxTokens());
+    }
+
+    @Test
+    void honoursAConfiguredMaxTokens() {
+        clearConfiguration();
+        System.setProperty("companionai.llm.maxTokens", "2048");
+
+        assertEquals(2048, LlmProviderFactory.fromSystemProperties().maxTokens());
+    }
+
+    @Test
+    void readsMaxTokensFromTheEnvironment() {
+        clearConfiguration();
+        assertTrue(setEnvironment("LLM_MAX_TOKENS", "512"), environmentUnavailable());
+
+        assertEquals(512, LlmProviderFactory.fromSystemProperties().maxTokens());
+    }
+
+    @Test
+    void fallsBackTo1024ForANonNumericMaxTokens() {
+        clearConfiguration();
+        System.setProperty("companionai.llm.maxTokens", "abc");
+
+        assertEquals(1024, LlmProviderFactory.fromSystemProperties().maxTokens());
+        assertTrue(warnings().contains("Ignoring non-integer configuration value"), warnings());
+    }
+
+    @Test
+    void fallsBackTo1024ForANonPositiveMaxTokens() {
+        clearConfiguration();
+        System.setProperty("companionai.llm.maxTokens", "0");
+
+        assertEquals(1024, LlmProviderFactory.fromSystemProperties().maxTokens());
+        assertTrue(warnings().contains("Ignoring non-positive configuration value"), warnings());
     }
 
     @Test

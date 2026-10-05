@@ -75,6 +75,12 @@ public final class CloudFallback {
                 OpenAiProvider.DEFAULT_BASE_URL);
         double temperature = Config.decimal("companionai.cloud.temperature", "COMPANIONAI_CLOUD_TEMPERATURE", 0.2);
         boolean history = Config.bool("companionai.cloud.includeHistory", "COMPANIONAI_CLOUD_INCLUDE_HISTORY", false);
+        // The same output cap as the local provider: a runaway reply costs real money here.
+        int maxTokens = Config.integer("companionai.llm.maxTokens", "LLM_MAX_TOKENS",
+                LlmProviderFactory.DEFAULT_MAX_TOKENS);
+        if (maxTokens <= 0) {
+            maxTokens = LlmProviderFactory.DEFAULT_MAX_TOKENS;
+        }
 
         if (!wanted) {
             return disabled();
@@ -86,7 +92,7 @@ public final class CloudFallback {
             return disabled();
         }
         return new CloudFallback(true,
-                new OpenAiProvider(model, baseUrl, apiKey, temperature), history, model);
+                new OpenAiProvider(model, baseUrl, apiKey, temperature, maxTokens), history, model);
     }
 
     /** Builds a fallback around an already-constructed provider. Used by tests. */

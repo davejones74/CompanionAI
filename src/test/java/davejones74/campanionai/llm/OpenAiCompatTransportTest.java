@@ -152,6 +152,94 @@ class OpenAiCompatTransportTest {
     }
 
     @Test
+    void reportsFinishReasonAndUsageOnCompletion() throws Exception {
+        try (StubLlmServer s = new StubLlmServer()) {
+            s.chatSse(delta("Hel"),
+                    "{\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}],"
+                            + "\"usage\":{\"completion_tokens\":1024}}",
+                    "[DONE]");
+            List<String> out = new ArrayList<>();
+            List<StreamCompletion> completions = new ArrayList<>();
+            new OpenAiCompatTransport(s.url(), "Test").stream(CHAT_PATH, request(true).toString(),
+                    new LlmProvider.ChunkHandler() {
+                        @Override
+                        public void onDelta(String delta) {
+                            out.add(delta);
+                        }
+
+                        @Override
+                        public void onComplete(StreamCompletion completion) {
+                            completions.add(completion);
+                        }
+                    });
+
+            assertEquals(List.of("Hel"), out);
+            assertEquals(1, completions.size());
+            assertEquals("length", completions.get(0).finishReason());
+            assertEquals(1024, completions.get(0).completionTokens());
+            assertTrue(completions.get(0).reachedOutputLimit());
+        }
+    }
+
+    @Test
+    void reportsCompletionWhenTheStreamEndsWithoutADoneTerminator() throws Exception {
+        try (StubLlmServer s = new StubLlmServer()) {
+            s.chatSse(delta("a"), delta("b"));
+            List<StreamCompletion> completions = new ArrayList<>();
+            new OpenAiCompatTransport(s.url(), "Test").stream(CHAT_PATH, request(true).toString(),
+                    new LlmProvider.ChunkHandler() {
+                        @Override
+                        public void onDelta(String delta) {
+                        }
+
+                        @Override
+                        public void onComplete(StreamCompletion completion) {
+                            completions.add(completion);
+                        }
+                    });
+
+            assertEquals(1, completions.size());
+            assertEquals(null, completions.get(0).finishReason());
+        }
+    }
+
+    @Test
+    void doesNotReportCompletionWhenTheStreamFails() throws Exception {
+        try (StubLlmServer s = new StubLlmServer()) {
+            s.chatSse(delta("a"), "{\"error\":{\"message\":\"boom\"}}");
+            List<StreamCompletion> completions = new ArrayList<>();
+            LlmException e = assertThrows(LlmException.class,
+                    () -> new OpenAiCompatTransport(s.url(), "Test")
+                            .stream(CHAT_PATH, request(true).toString(), new LlmProvider.ChunkHandler() {
+                                @Override
+                                public void onDelta(String delta) {
+                                }
+
+                                @Override
+                                public void onComplete(StreamCompletion completion) {
+                                    completions.add(completion);
+                                }
+                            }));
+            assertTrue(e.getMessage().contains("boom"), e.getMessage());
+            assertTrue(completions.isEmpty());
+        }
+    }
+
+    @Test
+    void propagatesHandlerRuntimeExceptionsUnwrapped() throws Exception {
+        try (StubLlmServer s = new StubLlmServer()) {
+            s.chatSse(delta("a"), delta("b"), "[DONE]");
+            IllegalStateException boom = new IllegalStateException("client gone");
+            IllegalStateException thrown = assertThrows(IllegalStateException.class,
+                    () -> new OpenAiCompatTransport(s.url(), "Test")
+                            .stream(CHAT_PATH, request(true).toString(), d -> {
+                                throw boom;
+                            }));
+            assertEquals(boom, thrown);
+        }
+    }
+
+    @Test
     void reportsErrorRaisedMidStream() throws Exception {
         try (StubLlmServer s = new StubLlmServer()) {
             s.chatSse(delta("a"), "{\"error\":{\"message\":\"context length exceeded\"}}");

@@ -24,6 +24,11 @@ public interface LlmProvider {
     /** Sampling temperature sent on every request. */
     double temperature();
 
+    /** Maximum output tokens requested per reply, sent as {@code max_tokens}. */
+    default int maxTokens() {
+        return LlmProviderFactory.DEFAULT_MAX_TOKENS;
+    }
+
     /** Base URL this provider was configured with. */
     String baseUrl();
 
@@ -67,6 +72,15 @@ public interface LlmProvider {
          * {@link #onDelta(String)} so existing providers and callers continue to work unchanged.
          */
         default void onThinking(String delta) {
+            // no-op by default
+        }
+
+        /**
+         * Called exactly once when the stream ends normally (with or without a
+         * {@code [DONE]} terminator), carrying the runtime's finish reason and
+         * token usage when it sent them. Not called when the stream fails.
+         */
+        default void onComplete(StreamCompletion completion) {
             // no-op by default
         }
     }

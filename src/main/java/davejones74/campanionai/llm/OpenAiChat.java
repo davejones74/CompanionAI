@@ -25,7 +25,7 @@ final class OpenAiChat {
                                List<LlmMessage> messages,
                                double temperature,
                                boolean stream) {
-        return envelope(mapper, model, messages, temperature, stream, null);
+        return envelope(mapper, model, messages, temperature, stream, null, null);
     }
 
     static ObjectNode envelope(ObjectMapper mapper,
@@ -34,6 +34,16 @@ final class OpenAiChat {
                                double temperature,
                                boolean stream,
                                List<com.fasterxml.jackson.databind.JsonNode> tools) {
+        return envelope(mapper, model, messages, temperature, stream, tools, null);
+    }
+
+    static ObjectNode envelope(ObjectMapper mapper,
+                               String model,
+                               List<LlmMessage> messages,
+                               double temperature,
+                               boolean stream,
+                               List<com.fasterxml.jackson.databind.JsonNode> tools,
+                               Integer maxTokens) {
         ArrayNode array = mapper.createArrayNode();
         for (LlmMessage message : messages) {
             ObjectNode m = mapper.createObjectNode()
@@ -52,6 +62,9 @@ final class OpenAiChat {
                 .put("stream", stream)
                 .put("temperature", temperature);
         node.set("messages", array);
+        if (maxTokens != null) {
+            node.put("max_tokens", maxTokens.intValue());
+        }
         if (tools != null && !tools.isEmpty()) {
             ArrayNode toolNodes = mapper.createArrayNode();
             for (com.fasterxml.jackson.databind.JsonNode t : tools) {

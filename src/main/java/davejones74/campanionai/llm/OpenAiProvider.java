@@ -32,16 +32,27 @@ public final class OpenAiProvider implements LlmProvider {
 
     private final String model;
     private final double temperature;
+    private final int maxTokens;
     private final OpenAiCompatTransport transport;
 
     public OpenAiProvider(String model, String baseUrl, String apiKey, double temperature) {
-        this(model, temperature,
+        this(model, baseUrl, apiKey, temperature, LlmProviderFactory.DEFAULT_MAX_TOKENS);
+    }
+
+    public OpenAiProvider(String model, String baseUrl, String apiKey, double temperature,
+                          int maxTokens) {
+        this(model, temperature, maxTokens,
                 new OpenAiCompatTransport(withoutVersionSegment(baseUrl), "Cloud model", apiKey));
     }
 
     OpenAiProvider(String model, double temperature, OpenAiCompatTransport transport) {
+        this(model, temperature, LlmProviderFactory.DEFAULT_MAX_TOKENS, transport);
+    }
+
+    OpenAiProvider(String model, double temperature, int maxTokens, OpenAiCompatTransport transport) {
         this.model = model;
         this.temperature = temperature;
+        this.maxTokens = maxTokens;
         this.transport = transport;
     }
 
@@ -66,6 +77,11 @@ public final class OpenAiProvider implements LlmProvider {
     }
 
     @Override
+    public int maxTokens() {
+        return maxTokens;
+    }
+
+    @Override
     public String baseUrl() {
         return transport.baseUrl();
     }
@@ -86,7 +102,8 @@ public final class OpenAiProvider implements LlmProvider {
     }
 
     private ObjectNode body(List<LlmMessage> messages, boolean stream) {
-        return OpenAiChat.envelope(transport.mapper(), model, messages, temperature, stream);
+        return OpenAiChat.envelope(transport.mapper(), model, messages, temperature, stream,
+                null, maxTokens);
     }
 
     /** Drops a trailing {@code /v1} so that a pasted versioned URL does not double up. */

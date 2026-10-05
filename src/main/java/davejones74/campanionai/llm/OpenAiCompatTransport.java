@@ -122,6 +122,10 @@ public final class OpenAiCompatTransport {
             readStream(response.body(), handler);
         } catch (LlmException e) {
             throw e;
+        } catch (RuntimeException e) {
+            // Thrown by the ChunkHandler itself (for example when the downstream
+            // client disconnected); it must not be relabelled as an upstream failure.
+            throw e;
         } catch (Exception e) {
             throw unreachable(e);
         }
@@ -174,6 +178,8 @@ public final class OpenAiCompatTransport {
     }
 
     private void readStream(Stream<String> lines, LlmProvider.ChunkHandler handler) throws LlmException {
+        String finishReason = null;
+        Integer completionTokens = null;
         try (Stream<String> body = lines) {
             Iterator<String> it = body.iterator();
             while (it.hasNext()) {
@@ -191,6 +197,7 @@ public final class OpenAiCompatTransport {
                         continue;
                     }
                     if (DONE.equals(data)) {
+                        handler.onComplete(new StreamCompletion(finishReason, completionTokens));
                         return;
                     }
                     line = data;
@@ -202,6 +209,14 @@ public final class OpenAiCompatTransport {
                     continue;
                 }
                 throwIfError(root);
+                String reason = finishReason(root);
+                if (reason != null) {
+                    finishReason = reason;
+                }
+                Integer tokens = completionTokens(root);
+                if (tokens != null) {
+                    completionTokens = tokens;
+                }
                 if (root.path("done").asBoolean(false)) {
                     continue;
                 }
@@ -212,6 +227,24 @@ public final class OpenAiCompatTransport {
                 }
             }
         }
+        handler.onComplete(new StreamCompletion(finishReason, completionTokens));
+    }
+
+    private static String finishReason(JsonNode root) {
+        JsonNode choices = root.path("choices");
+        if (!choices.isArray() || choices.isEmpty()) {
+            return null;
+        }
+        JsonNode reason = choices.get(0).path("finish_reason");
+        if (reason.isTextual() && !reason.asText().isBlank()) {
+            return reason.asText();
+        }
+        return null;
+    }
+
+    private static Integer completionTokens(JsonNode root) {
+        JsonNode tokens = root.path("usage").path("completion_tokens");
+        return tokens.isInt() || tokens.isLong() ? tokens.asInt() : null;
     }
 
     private static boolean startsWithField(String line, String... prefixes) {

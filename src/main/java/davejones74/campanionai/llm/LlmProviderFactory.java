@@ -26,6 +26,7 @@ public final class LlmProviderFactory {
     public static final String DEFAULT_PROVIDER = "ollama";
     public static final String DEFAULT_MODEL = "qwen3.6:27b";
     public static final double DEFAULT_TEMPERATURE = 0.7;
+    public static final int DEFAULT_MAX_TOKENS = 1024;
 
     private static final Logger LOG = LogManager.getLogger(LlmProviderFactory.class);
 
@@ -41,6 +42,8 @@ public final class LlmProviderFactory {
             "companionai.llm.numCtx", "campanionai.numCtx"};
     private static final String[] THINK_KEYS = {
             "companionai.llm.think", "campanionai.llm.think"};
+    private static final String[] MAX_TOKENS_KEYS = {
+            "companionai.llm.maxTokens", "campanionai.llm.maxTokens"};
 
     private static final String LEGACY_OLLAMA_URL_KEY = "campanionai.ollamaUrl";
 
@@ -53,10 +56,11 @@ public final class LlmProviderFactory {
         double temperature = decimal(lookup(TEMPERATURE_KEYS, "LLM_TEMPERATURE"), DEFAULT_TEMPERATURE);
         Integer numCtx = integer(lookup(NUM_CTX_KEYS, "LLM_NUM_CTX"));
         boolean think = bool(lookup(THINK_KEYS, "LLM_THINK"), false);
+        int maxTokens = positiveInteger(lookup(MAX_TOKENS_KEYS, "LLM_MAX_TOKENS"), DEFAULT_MAX_TOKENS);
         String configuredBaseUrl = explicitBaseUrl(providerName);
 
         String baseUrl = resolveBaseUrl(providerName, configuredBaseUrl);
-        LlmProvider provider = create(providerName, baseUrl, model, temperature, numCtx, think);
+        LlmProvider provider = create(providerName, baseUrl, model, temperature, numCtx, think, maxTokens);
 
         if (numCtx != null && !provider.capabilities().has(LlmCapability.PER_REQUEST_CONTEXT_LENGTH)) {
             LOG.warn("{} does not support a per-request context length; ignoring {}.",
@@ -91,6 +95,16 @@ public final class LlmProviderFactory {
                                      double temperature,
                                      Integer numCtx,
                                      boolean think) {
+        return create(providerName, baseUrl, model, temperature, numCtx, think, DEFAULT_MAX_TOKENS);
+    }
+
+    public static LlmProvider create(String providerName,
+                                     String baseUrl,
+                                     String model,
+                                     double temperature,
+                                     Integer numCtx,
+                                     boolean think,
+                                     int maxTokens) {
         String name = normalize(providerName);
         if (name == null) {
             name = DEFAULT_PROVIDER;
@@ -99,9 +113,9 @@ public final class LlmProviderFactory {
         String resolvedModel = isBlank(model) ? DEFAULT_MODEL : model.trim();
 
         return switch (name) {
-            case "ollama" -> new OllamaProvider(resolvedModel, resolvedBaseUrl, temperature, numCtx);
+            case "ollama" -> new OllamaProvider(resolvedModel, resolvedBaseUrl, temperature, numCtx, maxTokens);
             case "fastflowlm" -> new FastFlowLmProvider(
-                    resolvedModel, resolvedBaseUrl, temperature, think);
+                    resolvedModel, resolvedBaseUrl, temperature, think, maxTokens);
             default -> throw unknownProvider(providerName);
         };
     }
@@ -179,6 +193,28 @@ public final class LlmProviderFactory {
         } catch (NumberFormatException e) {
             LOG.warn("Ignoring non-integer configuration value '{}'.", value);
             return null;
+        }
+    }
+
+    /**
+     * Positive-integer lookup that degrades to {@code fallback} rather than throwing, so a
+     * malformed {@code LLM_MAX_TOKENS} cannot prevent startup. Zero and negatives are invalid:
+     * {@code max_tokens=0} would ask the runtime for an empty reply.
+     */
+    private static int positiveInteger(String value, int fallback) {
+        if (isBlank(value)) {
+            return fallback;
+        }
+        try {
+            int parsed = Integer.parseInt(value.trim());
+            if (parsed > 0) {
+                return parsed;
+            }
+            LOG.warn("Ignoring non-positive configuration value '{}'; using {}.", value, fallback);
+            return fallback;
+        } catch (NumberFormatException e) {
+            LOG.warn("Ignoring non-integer configuration value '{}'; using {}.", value, fallback);
+            return fallback;
         }
     }
 

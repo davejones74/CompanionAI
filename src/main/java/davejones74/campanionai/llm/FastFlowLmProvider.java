@@ -53,10 +53,17 @@ public final class FastFlowLmProvider implements LlmProvider {
     private final String model;
     private final double temperature;
     private final boolean think;
+    private final int maxTokens;
     private final OpenAiCompatTransport transport;
 
     public FastFlowLmProvider(String model, String baseUrl, double temperature, boolean think) {
-        this(model, baseUrl, temperature, think,
+        this(model, baseUrl, temperature, think, LlmProviderFactory.DEFAULT_MAX_TOKENS,
+                new OpenAiCompatTransport(baseUrl, "FastFlowLM"));
+    }
+
+    public FastFlowLmProvider(String model, String baseUrl, double temperature, boolean think,
+                              int maxTokens) {
+        this(model, baseUrl, temperature, think, maxTokens,
                 new OpenAiCompatTransport(baseUrl, "FastFlowLM"));
     }
 
@@ -65,9 +72,19 @@ public final class FastFlowLmProvider implements LlmProvider {
                               double temperature,
                               boolean think,
                               OpenAiCompatTransport transport) {
+        this(model, baseUrl, temperature, think, LlmProviderFactory.DEFAULT_MAX_TOKENS, transport);
+    }
+
+    public FastFlowLmProvider(String model,
+                              String baseUrl,
+                              double temperature,
+                              boolean think,
+                              int maxTokens,
+                              OpenAiCompatTransport transport) {
         this.model = model;
         this.temperature = temperature;
         this.think = think;
+        this.maxTokens = maxTokens;
         this.transport = transport;
     }
 
@@ -89,6 +106,11 @@ public final class FastFlowLmProvider implements LlmProvider {
     @Override
     public double temperature() {
         return temperature;
+    }
+
+    @Override
+    public int maxTokens() {
+        return maxTokens;
     }
 
     @Override
@@ -128,7 +150,7 @@ public final class FastFlowLmProvider implements LlmProvider {
     private ObjectNode body(List<LlmMessage> messages, boolean stream,
                             java.util.List<com.fasterxml.jackson.databind.JsonNode> tools) {
         ObjectNode node = OpenAiChat.envelope(
-                transport.mapper(), model, messages, temperature, stream, tools);
+                transport.mapper(), model, messages, temperature, stream, tools, maxTokens);
         node.set("think", transport.mapper().getNodeFactory().booleanNode(think));
         return node;
     }

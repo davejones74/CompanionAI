@@ -183,6 +183,52 @@ private ModelServlet servlet() throws Exception {
                 < out.body.indexOf("Here is what I found."), out.body);
     }
 
+    @Test
+    void streamCompletesNormallyWithoutInterruptedOrTruncatedFlags() throws Exception {
+        llm.chatSse("{\"choices\":[{\"delta\":{\"content\":\"Hi there\"}}]}",
+                "{\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}", "[DONE]");
+
+        Response out = post(servlet(), "/api/chat/stream", "{\"message\":\"hello there\"}");
+
+        assertEquals(200, out.status, out.body);
+        assertTrue(out.body.contains("Hi there"), out.body);
+        assertTrue(out.body.contains("\"interrupted\":false"), out.body);
+        assertTrue(out.body.contains("\"truncated\":false"), out.body);
+    }
+
+    @Test
+    void streamReachingTheTokenLimitIsReportedAsTruncatedNotFailed() throws Exception {
+        llm.chatSse("{\"choices\":[{\"delta\":{\"content\":\"Partial answer\"}}]}",
+                "{\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}],"
+                        + "\"usage\":{\"completion_tokens\":1024}}", "[DONE]");
+
+        Response out = post(servlet(), "/api/chat/stream", "{\"message\":\"hello there\"}");
+
+        assertEquals(200, out.status, out.body);
+        assertTrue(out.body.contains("Partial answer"), out.body);
+        assertTrue(out.body.contains("\"truncated\":true"), out.body);
+        assertTrue(out.body.contains("\"interrupted\":false"), out.body);
+        assertFalse(out.body.contains("\"error\""), out.body);
+    }
+
+    @Test
+    void anInterruptedStreamKeepsThePartialReplyAndDoesNotRetry() throws Exception {
+        llm.chatSse("{\"choices\":[{\"delta\":{\"content\":\"Partial answer\"}}]}",
+                "{\"error\":{\"message\":\"connection reset\"}}");
+        ModelServlet servlet = servlet();
+        int requestsBefore = llm.requests();
+
+        Response out = post(servlet, "/api/chat/stream", "{\"message\":\"hello there\"}");
+
+        assertEquals(200, out.status, out.body);
+        assertTrue(out.body.contains("Partial answer"),
+                "the partial reply must be kept, not replaced by a generic error: " + out.body);
+        assertTrue(out.body.contains("\"interrupted\":true"), out.body);
+        assertFalse(out.body.contains("\"error\""), out.body);
+        assertEquals(1, llm.requests() - requestsBefore,
+                "no second LLM request may be made once content has streamed");
+    }
+
     private String searchUrl(String path) {
         return "http://127.0.0.1:" + search.getAddress().getPort() + path;
     }

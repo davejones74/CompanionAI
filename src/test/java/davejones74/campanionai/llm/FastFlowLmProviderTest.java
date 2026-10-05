@@ -99,6 +99,28 @@ class FastFlowLmProviderTest {
     }
 
     @Test
+    void sendsTheDefaultMaxTokens() throws Exception {
+        try (StubLlmServer s = new StubLlmServer()) {
+            s.chatJson(completion("ok"));
+            new FastFlowLmProvider("qwen2.5-it:3b", s.url(), 0.7, false).chat(MESSAGES);
+
+            assertEquals(1024, s.lastRequest().path("max_tokens").asInt());
+        }
+    }
+
+    @Test
+    void sendsTheConfiguredMaxTokens() throws Exception {
+        try (StubLlmServer s = new StubLlmServer()) {
+            s.chatJson(completion("ok"));
+            new FastFlowLmProvider("qwen2.5-it:3b", s.url(), 0.7, false, 2048).chat(MESSAGES);
+
+            assertEquals(2048, s.lastRequest().path("max_tokens").asInt());
+            assertEquals(2048, new FastFlowLmProvider("qwen2.5-it:3b", s.url(), 0.7, false, 2048)
+                    .maxTokens());
+        }
+    }
+
+    @Test
     void requestsStreamingAndRelaysDeltas() throws Exception {
         try (StubLlmServer s = new StubLlmServer()) {
             s.chatSse(delta("Hel"), delta("lo"), "[DONE]");

@@ -1319,3 +1319,31 @@ Next deployment work, in order:
 3. Implement the provider abstraction per [LLM-Provider-Architecture.md](LLM-Provider-Architecture.md).
 4. Package CompanionAI as a managed application/service, configure its secrets and persistent data directory, create its DNS hostname, configure Nginx reverse proxying, obtain its Let's Encrypt certificate, and validate the public HTTPS deployment.
 5. Apply the FastFlowLM listener security configuration recorded in §22.
+
+---
+
+## Host performance tuning
+
+`[VALIDATED]` Applied on the X1 Pro HX-370 to improve token-per-second throughput.
+
+### CPU governor
+
+To ensure the HX-370 SoC is prioritising throughput, install `cpupower` and set the governor to `performance`:
+
+```bash
+sudo apt install linux-tools-common linux-tools-generic
+sudo cpupower frequency-set -g performance
+```
+
+### memlock limits
+
+If `memlock` is too low, the system will constantly swap or thrash memory segments, heavily degrading token-per-second performance:
+
+```bash
+sudo vi /etc/security/limits.conf
+```
+
+```text
+* soft memlock unlimited
+* hard memlock unlimited
+```
