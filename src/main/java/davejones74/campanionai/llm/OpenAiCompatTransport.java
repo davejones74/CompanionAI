@@ -34,6 +34,16 @@ import java.util.stream.Stream;
  */
 public final class OpenAiCompatTransport {
 
+    private static final org.apache.logging.log4j.Logger LOG =
+            org.apache.logging.log4j.LogManager.getLogger(OpenAiCompatTransport.class);
+
+    /**
+     * TEMPORARY DIAGNOSTIC: logs the complete outbound request body, including every
+     * message in full, when {@code companionai.llm.debugRequests=true} (or
+     * {@code LLM_DEBUG_REQUESTS=true}). Remove once the Qwen 3.5 investigation closes.
+     */
+    private static final boolean DEBUG_REQUESTS = debugRequestsEnabled();
+
     static final int CONNECT_TIMEOUT_SECONDS = 10;
     static final int COMPLETE_TIMEOUT_SECONDS = 120;
     static final int STREAM_TIMEOUT_SECONDS = 300;
@@ -157,6 +167,9 @@ public final class OpenAiCompatTransport {
     }
 
     private HttpRequest post(String path, String body, int timeoutSeconds) {
+        if (DEBUG_REQUESTS) {
+            logRequestBody(path, body);
+        }
         HttpRequest.Builder builder = HttpRequest.newBuilder()
                 .uri(uri(path))
                 .header("Content-Type", "application/json")
@@ -170,6 +183,48 @@ public final class OpenAiCompatTransport {
     private void authorize(HttpRequest.Builder builder) {
         if (bearerToken != null) {
             builder.header("Authorization", "Bearer " + bearerToken);
+        }
+    }
+
+    private static boolean debugRequestsEnabled() {
+        String v = System.getProperty("companionai.llm.debugRequests");
+        if (v == null || v.isBlank()) {
+            v = System.getProperty("campanionai.llm.debugRequests");
+        }
+        if (v == null || v.isBlank()) {
+            v = System.getenv("LLM_DEBUG_REQUESTS");
+        }
+        return v != null && v.trim().equalsIgnoreCase("true");
+    }
+
+    /**
+     * TEMPORARY DIAGNOSTIC. Logs the full request body plus a per-message breakdown
+     * (role, characters, rough token estimate). The bearer token is a header and is
+     * never logged; message content itself may contain user data, which is why this
+     * is opt-in and temporary.
+     */
+    private void logRequestBody(String path, String body) {
+        LOG.info("[LLM-REQUEST] POST {}{} bodyBytes={}", baseUrl, path, body.length());
+        try {
+            JsonNode root = mapper.readTree(body);
+            LOG.info("[LLM-REQUEST] model={} stream={} temperature={} max_tokens={} think={}",
+                    root.path("model").asText("<absent>"),
+                    root.path("stream").asText("<absent>"),
+                    root.path("temperature").asText("<absent>"),
+                    root.path("max_tokens").asText("<absent>"),
+                    root.path("think").asText("<absent>"));
+            JsonNode messages = root.path("messages");
+            if (messages.isArray()) {
+                for (int i = 0; i < messages.size(); i++) {
+                    JsonNode m = messages.get(i);
+                    String content = m.path("content").asText("");
+                    LOG.info("[LLM-REQUEST] messages[{}] role={} chars={} ~tokens={} content={}",
+                            i, m.path("role").asText("<absent>"), content.length(),
+                            davejones74.campanionai.Tokens.estimate(content), content);
+                }
+            }
+        } catch (Exception e) {
+            LOG.info("[LLM-REQUEST] body not parseable, raw: {}", body);
         }
     }
 
