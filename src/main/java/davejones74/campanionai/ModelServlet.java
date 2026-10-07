@@ -31,6 +31,13 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.regex.Matcher;
 import java.util.LinkedHashSet;
 import java.util.regex.Pattern;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.UUID;
 
 import davejones74.campanionai.llm.LlmException;
 import davejones74.campanionai.llm.LlmMessage;
@@ -186,6 +193,26 @@ public class ModelServlet extends HttpServlet {
 
     private final java.util.concurrent.atomic.AtomicReference<davejones74.campanionai.chat.ChatStore> chatStoreRef = new java.util.concurrent.atomic.AtomicReference<>();
     private final java.util.concurrent.atomic.AtomicReference<davejones74.campanionai.chat.ToolExecutor> toolExecutorRef = new java.util.concurrent.atomic.AtomicReference<>();
+
+    /**
+     * Single daemon scheduler for SSE keepalives. One thread serves every open stream, so a
+     * burst of chats does not create a thread-per-request. Daemon so it never blocks JVM exit.
+     */
+    private static final ThreadFactory HEARTBEAT_THREADS = r -> {
+        Thread t = new Thread(r, "sse-heartbeat");
+        t.setDaemon(true);
+        return t;
+    };
+    private final ScheduledExecutorService sseHeartbeats =
+            Executors.newSingleThreadScheduledExecutor(HEARTBEAT_THREADS);
+
+    private final long sseHeartbeatMs = Config.longValue(
+            "campanionai.sse.heartbeatMs", "COMPANIONAI_SSE_HEARTBEAT_MS", 15000L);
+
+    @Override
+    public void destroy() {
+        sseHeartbeats.shutdownNow();
+    }
 
     @Override
     public void init() {
@@ -640,7 +667,8 @@ public class ModelServlet extends HttpServlet {
                                           davejones74.campanionai.retrieval.WebSearchProfile profile,
                                           String liveBlock,
                                           LlmException localFailure,
-                                          PrintWriter out) {
+                                          PrintWriter out,
+                                          Object writeLock) {
         if (llm == null || !cloud.maySend(profile)) {
             LOG.info("Local stream unavailable ({}); staying local: {}.",
                     String.valueOf(localFailure.getMessage()),
@@ -660,7 +688,9 @@ public class ModelServlet extends HttpServlet {
                 public void onDelta(String delta) {
                     collected.append(delta);
                     try {
-                        writeEvent(out, Map.of("delta", delta));
+                        synchronized (writeLock) {
+                            writeEvent(out, Map.of("delta", delta));
+                        }
                     } catch (IOException e) {
                         throw new StreamAbort(e);
                     }
@@ -669,8 +699,10 @@ public class ModelServlet extends HttpServlet {
                 @Override
                 public void onThinking(String delta) {
                     try {
-                        if (showThinkingDefault) {
-                            writeEvent(out, Map.of("thought", delta));
+                        synchronized (writeLock) {
+                            if (showThinkingDefault) {
+                                writeEvent(out, Map.of("thought", delta));
+                            }
                         }
                     } catch (IOException e) {
                         throw new StreamAbort(e);
@@ -683,8 +715,10 @@ public class ModelServlet extends HttpServlet {
             }
             stats.recordCloudFallback();
             try {
-                writeEvent(out, Map.of("cloudFallback",
-                        java.util.Map.of("model", cloud.model(), "notice", cloud.notice())));
+                synchronized (writeLock) {
+                    writeEvent(out, Map.of("cloudFallback",
+                            java.util.Map.of("model", cloud.model(), "notice", cloud.notice())));
+                }
             } catch (IOException e) {
                 throw new StreamAbort(e);
             }
@@ -842,6 +876,7 @@ return new ChatResult("I couldn't reach the language model right now: " + e.getM
         } catch (IOException e) {
             return;
         }
+        ScheduledFuture<?> heartbeatToCancel = null;
         try {
             if (input.trim().isEmpty()) {
                 writeEvent(out, Map.of("error", "Please type something first."));
@@ -850,22 +885,59 @@ return new ChatResult("I couldn't reach the language model right now: " + e.getM
             }
             stats.recordStart();
             long t0 = System.nanoTime();
+            final String requestId = UUID.randomUUID().toString().substring(0, 8);
+            LOG.info("[STREAM] started requestId={}", requestId);
+            final Object streamLock = new Object();
+            final AtomicBoolean firstEventSent = new AtomicBoolean();
+            class Sse {
+                void event(Map<String, ?> fields) throws IOException {
+                    synchronized (streamLock) {
+                        writeEvent(out, fields);
+                    }
+                    if (firstEventSent.compareAndSet(false, true)) {
+                        LOG.info("[SSE] first event sent requestId={} elapsedMs={}",
+                                requestId, (System.nanoTime() - t0) / 1_000_000L);
+                    }
+                }
+
+                void done(boolean offline, boolean interrupted, boolean truncated) throws IOException {
+                    synchronized (streamLock) {
+                        writeDone(out, offline, interrupted, truncated);
+                    }
+                }
+
+                void heartbeat() {
+                    synchronized (streamLock) {
+                        out.write(": keepalive\n\n");
+                        out.flush();
+                    }
+                }
+            }
+            final Sse sse = new Sse();
+            ScheduledFuture<?> heartbeat = sseHeartbeatMs > 0
+                    ? sseHeartbeats.scheduleWithFixedDelay(() -> {
+                        sse.heartbeat();
+                        LOG.info("[SSE] heartbeat requestId={} elapsedMs={}",
+                                requestId, (System.nanoTime() - t0) / 1_000_000L);
+                    }, sseHeartbeatMs, sseHeartbeatMs, TimeUnit.MILLISECONDS)
+                    : null;
+            heartbeatToCancel = heartbeat;
             List<String> urls = new ArrayList<>();
             for (String u : findUrls(input)) {
-                writeEvent(out, Map.of("status", "Fetching " + u + "..."));
+                sse.event(Map.of("status", "Fetching " + u + "..."));
                 try {
                     ensureFetched(u);
                     urls.add(u);
                 } catch (IOException e) {
                     LOG.warn("URL fetch failed: {}", String.valueOf(e.getMessage()));
-                    writeEvent(out, Map.of("error", "Couldn't fetch " + u + ": " + e.getMessage()));
-                    writeDone(out, false);
+                    sse.event(Map.of("error", "Couldn't fetch " + u + ": " + e.getMessage()));
+                    sse.done(false, false, false);
                     return;
                 }
             }
             List<Chunk> ctx = selectContext(input, urls);
             davejones74.campanionai.retrieval.LiveContext lc = liveContext(input, status -> {
-                try { writeEvent(out, Map.of("status", status)); } catch (IOException e) { throw new StreamAbort(e); }
+                try { sse.event(Map.of("status", status)); } catch (IOException e) { throw new StreamAbort(e); }
             });
             String live = lc.promptBlock();
             String system = systemPrompt(ctx, live);
@@ -895,9 +967,9 @@ return new ChatResult("I couldn't reach the language model right now: " + e.getM
                     cu.system() + historySent + cu.input(), messages.size());
             java.util.List<Source> sources = collectSources(urls, lc);
             for (Source s : sources) {
-                try { writeEvent(out, java.util.Map.of("source", s)); } catch (IOException e) { throw new StreamAbort(e); }
+                try { sse.event(java.util.Map.of("source", s)); } catch (IOException e) { throw new StreamAbort(e); }
             }
-            try { writeEvent(out, java.util.Map.of("metadata", java.util.Map.of("contextUsage", java.util.Map.of(
+            try { sse.event(java.util.Map.of("metadata", java.util.Map.of("contextUsage", java.util.Map.of(
                     "used", cu.used(), "limit", cu.limit(), "percentage", cu.percentage(),
                     "system", cu.system(), "history", cu.history(), "knowledge", cu.knowledge(), "live", cu.live(), "input", cu.input())))); } catch (IOException e) { throw new StreamAbort(e); }
 
@@ -912,7 +984,7 @@ return new ChatResult("I couldn't reach the language model right now: " + e.getM
                     filesJson.add(java.util.Map.of(
                             "name", f.name(), "url", f.url(), "mimeType", f.mimeType(), "size", f.size()));
                 }
-                try { writeEvent(out, java.util.Map.of("files", filesJson)); } catch (IOException e) { throw new StreamAbort(e); }
+                try { sse.event(java.util.Map.of("files", filesJson)); } catch (IOException e) { throw new StreamAbort(e); }
             }
 
             StringBuilder replyBuilder = new StringBuilder();
@@ -923,15 +995,22 @@ return new ChatResult("I couldn't reach the language model right now: " + e.getM
             java.util.concurrent.atomic.AtomicReference<StreamCompletion> completion =
                     new java.util.concurrent.atomic.AtomicReference<>();
             LOG.info("[LLM] model={} maxTokens={}", llm.model(), llm.maxTokens());
+            LOG.info("[LLM] started requestId={} elapsedMs={}", requestId, (System.nanoTime() - t0) / 1_000_000L);
+            final AtomicBoolean firstDeltaLogged = new AtomicBoolean();
+            final AtomicBoolean firstThinkingLogged = new AtomicBoolean();
             try {
                 llm.chatStream(streamMessages, new LlmProvider.ChunkHandler() {
                     @Override
                     public void onDelta(String delta) {
                         replyBuilder.append(delta);
                         try {
-                            writeEvent(out, Map.of("delta", delta));
+                            sse.event(Map.of("delta", delta));
                         } catch (IOException e) {
                             throw new StreamAbort(e);
+                        }
+                        if (firstDeltaLogged.compareAndSet(false, true)) {
+                            LOG.info("[LLM] first content requestId={} elapsedMs={}",
+                                    requestId, (System.nanoTime() - t0) / 1_000_000L);
                         }
                     }
 
@@ -939,10 +1018,14 @@ return new ChatResult("I couldn't reach the language model right now: " + e.getM
                     public void onThinking(String delta) {
                         try {
                             if (showThinkingDefault) {
-                                writeEvent(out, Map.of("thought", delta));
+                                sse.event(Map.of("thought", delta));
                             }
                         } catch (IOException e) {
                             throw new StreamAbort(e);
+                        }
+                        if (firstThinkingLogged.compareAndSet(false, true)) {
+                            LOG.info("[LLM] reasoning activity requestId={} elapsedMs={}",
+                                    requestId, (System.nanoTime() - t0) / 1_000_000L);
                         }
                     }
 
@@ -964,16 +1047,20 @@ return new ChatResult("I couldn't reach the language model right now: " + e.getM
                     LOG.info("[LLM] Stream completed normally ({} characters, finish_reason={}).",
                             replyBuilder.length(), finishReason == null ? "unsent" : finishReason);
                 }
+                LOG.info("[LLM] stream completed requestId={} elapsedMs={}",
+                        requestId, (System.nanoTime() - t0) / 1_000_000L);
             } catch (StreamAbort e) {
                 LOG.info("[LLM] Client disconnected after {} character(s) had been sent.",
                         replyBuilder.length());
+                LOG.info("[SSE] client disconnected requestId={} elapsedMs={}",
+                        requestId, (System.nanoTime() - t0) / 1_000_000L);
                 return;
             } catch (LlmException localFailure) {
                 LOG.warn("[LLM] Stream failed: {}", localFailure.getMessage());
                 if (replyBuilder.isEmpty()) {
                     // Nothing has been shown yet, so a second model can answer cleanly.
                     // Retrying after the first few tokens would splice two answers together.
-                    cloudAnswer = cloudStreamReply(streamMessages, lc.profile(), live, localFailure, out);
+                    cloudAnswer = cloudStreamReply(streamMessages, lc.profile(), live, localFailure, out, streamLock);
                 } else {
                     interrupted = true;
                     LOG.warn("[LLM] Stream failed after {} character(s) had been sent; "
@@ -985,10 +1072,10 @@ return new ChatResult("I couldn't reach the language model right now: " + e.getM
                     if (fallback != null) {
                         offline = true;
                         replyBuilder.append(fallback).append("\n\n[LLM unavailable - offline reply]");
-                        writeEvent(out, Map.of("delta", fallback, "offline", true));
+                        sse.event(Map.of("delta", fallback, "offline", true));
                     } else {
-                        writeEvent(out, Map.of("error", "I couldn't reach the language model right now: " + localFailure.getMessage()));
-                        writeDone(out, true);
+                        sse.event(Map.of("error", "I couldn't reach the language model right now: " + localFailure.getMessage()));
+                        sse.done(true, false, false);
                         return;
                     }
                 }
@@ -1013,7 +1100,9 @@ return new ChatResult("I couldn't reach the language model right now: " + e.getM
             stats.addOutputTokens(estimateTokens(reply));
             stats.recordStreamed();
             recordLatency(t0, estimateTokens(reply));
-            writeDone(out, offline, interrupted, truncated);
+            LOG.info("[CHAT] persisted requestId={} elapsedMs={}", requestId, (System.nanoTime() - t0) / 1_000_000L);
+            sse.done(offline, interrupted, truncated);
+            LOG.info("[STREAM] completed requestId={} elapsedMs={}", requestId, (System.nanoTime() - t0) / 1_000_000L);
         } catch (StreamAbort e) {
             LOG.debug("Stream aborted (client disconnected).");
         } catch (Exception e) {
@@ -1022,6 +1111,10 @@ return new ChatResult("I couldn't reach the language model right now: " + e.getM
                 writeEvent(out, Map.of("error", String.valueOf(e.getMessage())));
                 writeDone(out, true);
             } catch (IOException ignored) {
+            }
+        } finally {
+            if (heartbeatToCancel != null) {
+                heartbeatToCancel.cancel(false);
             }
         }
     }

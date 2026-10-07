@@ -37,6 +37,7 @@ public final class StubLlmServer implements AutoCloseable {
     private volatile Reply chat = Reply.sse("{\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}", "[DONE]");
     private volatile Reply chatStream = null;
     private volatile Reply models = Reply.json("{\"data\":[{\"id\":\"model-a\"},{\"id\":\"model-b\"}]}");
+    private volatile long firstFrameDelayMs = 0;
 
     public StubLlmServer() throws IOException {
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
@@ -60,6 +61,12 @@ public final class StubLlmServer implements AutoCloseable {
      */
     public void chatStreamSse(String... frames) {
         chatStream = Reply.sse(frames);
+    }
+
+    /** Streams these frames, but waits {@code delayMillis} before the first one. */
+    public void chatSseDelayed(long delayMillis, String... frames) {
+        firstFrameDelayMs = delayMillis;
+        chat = Reply.sse(frames);
     }
 
     /** Streams bare newline-delimited JSON, with no SSE framing at all. */
@@ -116,7 +123,17 @@ public final class StubLlmServer implements AutoCloseable {
         if (reply.chunked()) {
             exchange.sendResponseHeaders(reply.status(), 0);
             try (OutputStream out = exchange.getResponseBody()) {
+                boolean first = true;
                 for (String line : reply.body().split("\n", -1)) {
+                    if (first && firstFrameDelayMs > 0) {
+                        try {
+                            Thread.sleep(firstFrameDelayMs);
+                        } catch (InterruptedException interrupted) {
+                            Thread.currentThread().interrupt();
+                            return;
+                        }
+                    }
+                    first = false;
                     out.write(line.getBytes(StandardCharsets.UTF_8));
                     out.write('\n');
                     out.flush();

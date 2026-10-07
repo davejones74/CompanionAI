@@ -229,6 +229,70 @@ private ModelServlet servlet() throws Exception {
                 "no second LLM request may be made once content has streamed");
     }
 
+    @Test
+    void streamSendsHeartbeatWhileTheModelIsStillThinking() throws Exception {
+        set("campanionai.sse.heartbeatMs", "50");
+        llm.chatSseDelayed(400,
+                "{\"choices\":[{\"delta\":{\"content\":\"Late answer\"}}]}", "[DONE]");
+
+        Response out = post(servlet(), "/api/chat/stream", "{\"message\":\"hello there\"}");
+
+        assertEquals(200, out.status, out.body);
+        assertTrue(out.body.contains(": keepalive"),
+                "a stalled first delta must be covered by SSE comments: " + out.body);
+        assertTrue(out.body.contains("Late answer"), out.body);
+        assertTrue(out.body.contains("\"interrupted\":false"), out.body);
+        assertFalse(out.body.contains("\"offline\":true"), out.body);
+    }
+
+    @Test
+    void heartbeatDoesNotLeakIntoThePersistedReply() throws Exception {
+        set("campanionai.sse.heartbeatMs", "50");
+        llm.chatSseDelayed(300,
+                "{\"choices\":[{\"delta\":{\"content\":\"Real answer\"}}]}", "[DONE]");
+        ModelServlet servlet = servlet();
+
+        Response out = post(servlet, "/api/chat/stream",
+                "{\"message\":\"hello there\",\"chatId\":\"chat-1\"}");
+
+        assertTrue(out.body.contains(": keepalive"), out.body);
+        davejones74.campanionai.chat.ChatStore cs =
+                new davejones74.campanionai.chat.ChatStore(dataDir);
+        try {
+            java.util.List<davejones74.campanionai.chat.ChatMessage> msgs = cs.loadMessages("chat-1");
+            assertEquals(2, msgs.size(), out.body);
+            assertEquals("Real answer", msgs.get(1).content(),
+                    "heartbeats are SSE comments and must never be persisted");
+        } catch (java.io.IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    @Test
+    void fastStreamEmitsNoStrayHeartbeatsAfterCompletion() throws Exception {
+        set("campanionai.sse.heartbeatMs", "50");
+        llm.chatSse("{\"choices\":[{\"delta\":{\"content\":\"Hi there\"}}]}", "[DONE]");
+
+        Response out = post(servlet(), "/api/chat/stream", "{\"message\":\"hello there\"}");
+
+        assertEquals(200, out.status, out.body);
+        assertTrue(out.body.contains("Hi there"), out.body);
+        assertTrue(out.body.contains("\"done\":true"), out.body);
+    }
+
+    @Test
+    void reasoningActivityIsLoggedEvenWhenHiddenFromTheBrowser() throws Exception {
+        llm.chatSse("{\"choices\":[{\"delta\":{\"reasoning_content\":\"thinking...\"}}]}",
+                "{\"choices\":[{\"delta\":{\"content\":\"Answer\"}}]}", "[DONE]");
+
+        Response out = post(servlet(), "/api/chat/stream", "{\"message\":\"hello there\"}");
+
+        assertEquals(200, out.status, out.body);
+        assertTrue(out.body.contains("Answer"), out.body);
+        assertFalse(out.body.contains("thinking..."),
+                "hidden thinking must not be forwarded to the browser: " + out.body);
+    }
+
     private static String toolCallReply(String... calls) {
         StringBuilder sb = new StringBuilder("{\"choices\":[{\"message\":{\"tool_calls\":[");
         for (int i = 0; i < calls.length; i++) {
