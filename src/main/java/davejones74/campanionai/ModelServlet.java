@@ -2867,7 +2867,14 @@ async function send() {
       fd.append('image', pendingImage);
       fd.append('chatId', currentChatId || '');
       const res = await fetch('/api/chat/image', { method: 'POST', body: fd });
-      const d = await res.json();
+      let d;
+      try {
+        d = await res.json();
+      } catch (parseErr) {
+        // Tomcat/nginx return an HTML error page (413/500) for oversized or bad
+        // multipart bodies; surface that cleanly instead of a JSON parse error.
+        throw new Error('upload rejected by the server (HTTP ' + res.status + '). Is the image a JPEG/PNG/WebP under 10 MB?');
+      }
       if (!res.ok || d.ok === false) throw new Error(d.message || ('HTTP ' + res.status));
       uploadedImage = d;
     } catch (e) {
