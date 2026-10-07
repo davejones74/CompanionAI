@@ -282,6 +282,57 @@ class ImageVisionTest {
     }
 
     @Test
+    void followUpAboutSameImageReusesCachedAnalysisAndSkipsVision() throws Exception {
+        ModelServlet servlet = servlet();
+        llm.chatSequence("{\"choices\":[{\"message\":{\"content\":\"A yellow rubber duck on a desk.\"},\"finish_reason\":\"stop\"}]}");
+        llm.chatStreamSse("{\"choices\":[{\"delta\":{\"content\":\"It is a duck.\"}}]}", "[DONE]");
+        Response up = postMultipart(servlet, "/api/chat/image", "image", "photo.png", PNG_1PX, "chat-1");
+        JsonNode saved = new ObjectMapper().readTree(up.body);
+        post(servlet, "/api/chat/stream",
+                "{\"message\":\"What is this?\",\"chatId\":\"chat-1\",\"imageId\":\"" + saved.path("id").asText() + "\"}");
+
+        llm.chatStreamSse("{\"choices\":[{\"delta\":{\"content\":\"It is yellow.\"}}]}", "[DONE]");
+        Response out2 = post(servlet, "/api/chat/stream",
+                "{\"message\":\"What colour is it?\",\"chatId\":\"chat-1\"}");
+
+        assertEquals(200, out2.status, out2.body);
+        assertEquals(3, llm.requests(), "vision once + two MAIN requests");
+        java.util.List<String> bodies = llm.allBodies();
+        String secondMain = bodies.get(2);
+        assertTrue(secondMain.contains("IMAGE ANALYSIS"), secondMain);
+        assertTrue(secondMain.contains("yellow rubber duck"), secondMain);
+        assertFalse(secondMain.contains("image_url"), "no new image sent to MAIN");
+        // vision model never called again: request 3 is a streaming main request
+        assertTrue(secondMain.contains("\"stream\":true"), secondMain);
+    }
+
+    @Test
+    void imageOnlyMessageDoesNotSendEmptyUserTurnToMain() throws Exception {
+        ModelServlet servlet = servlet();
+        llm.chatSequence("{\"choices\":[{\"message\":{\"content\":\"Duck on desk.\"},\"finish_reason\":\"stop\"}]}");
+        llm.chatStreamSse("{\"choices\":[{\"delta\":{\"content\":\"Duck.\"}}]}", "[DONE]");
+        Response up = postMultipart(servlet, "/api/chat/image", "image", "photo.png", PNG_1PX, "chat-1");
+        JsonNode saved = new ObjectMapper().readTree(up.body);
+
+        Response out = post(servlet, "/api/chat/stream",
+                "{\"message\":\"\",\"chatId\":\"chat-1\",\"imageId\":\"" + saved.path("id").asText() + "\"}");
+
+        assertEquals(200, out.status, out.body);
+        String visionReq = llm.allBodies().get(0);
+        assertTrue(visionReq.contains("What is in this image?"), visionReq);
+        String mainReq = llm.allBodies().get(1);
+        assertTrue(mainReq.contains("(image attached)"), mainReq);
+    }
+
+    @Test
+    void imageInputUsesCaptureAttribute() throws Exception {
+        Response out = get(servlet(), "/");
+        assertEquals(200, out.status, out.body);
+        assertTrue(out.body.contains("capture=\"environment\""), "image input must request the camera");
+        assertTrue(out.body.contains("accept=\"image/jpeg,image/png,image/webp\""), out.body);
+    }
+
+    @Test
     void imageReferenceSurvivesChatReload() throws Exception {
         ModelServlet servlet = servlet();
         llm.chatSequence("{\"choices\":[{\"message\":{\"content\":\"Observations.\"},\"finish_reason\":\"stop\"}]}");
