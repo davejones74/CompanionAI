@@ -44,6 +44,9 @@ import davejones74.campanionai.llm.LlmMessage;
 import davejones74.campanionai.llm.LlmProvider;
 import davejones74.campanionai.llm.LlmProviderFactory;
 import davejones74.campanionai.llm.LlmCapability;
+import davejones74.campanionai.llm.ModelRole;
+import davejones74.campanionai.llm.ImagePart;
+import davejones74.campanionai.ImageRef;
 import davejones74.campanionai.llm.StreamCompletion;
 import davejones74.campanionai.retrieval.LlmIntentClassifier;
 import davejones74.campanionai.retrieval.RetrievalKind;
@@ -70,6 +73,7 @@ public class ModelServlet extends HttpServlet {
     private final ObjectMapper json = new ObjectMapper()
             .registerModule(new com.fasterxml.jackson.datatype.jsr310.JavaTimeModule());
     private LlmProvider llm;
+    private LlmProvider vision;
     private Path dataDir;
 
     private final int maxChunksPerDoc = Config.integer(
@@ -222,6 +226,7 @@ public class ModelServlet extends HttpServlet {
             dataDir = Path.of(base).toAbsolutePath();
             Files.createDirectories(dataDir);
             llm = LlmProviderFactory.fromSystemProperties();
+            vision = LlmProviderFactory.fromSystemProperties(ModelRole.VISION);
             try { chatStoreRef.set(new ChatStore(dataDir)); toolExecutorRef.set(new ToolExecutor(dataDir)); } catch (Exception ignored) {}
             retrieval = buildRetrieval();
             reloadDocuments();
@@ -281,6 +286,16 @@ public class ModelServlet extends HttpServlet {
                 String parent = p.getParent() != null && p.getParent().getFileName() != null
                         ? p.getParent().getFileName().toString() : "";
                 if (parent.equals("chats") || parent.equals("generated")) {
+                    continue;
+                }
+                boolean underImages = false;
+                for (Path seg : p) {
+                    if (seg.getFileName() != null && seg.getFileName().toString().equals("images")) {
+                        underImages = true;
+                        break;
+                    }
+                }
+                if (underImages) {
                     continue;
                 }
                 try (InputStream in = Files.newInputStream(p)) {
@@ -591,7 +606,13 @@ public class ModelServlet extends HttpServlet {
             for (ChatMessage m : persisted) {
                 out.add(new LlmMessage(m.role(), m.content()));
             }
-            out.add(new LlmMessage("user", input));
+            // The handler may already have persisted this turn's user message; don't repeat it.
+            boolean alreadyPersisted = !persisted.isEmpty()
+                    && "user".equals(persisted.get(persisted.size() - 1).role())
+                    && persisted.get(persisted.size() - 1).content().equals(input);
+            if (!alreadyPersisted) {
+                out.add(new LlmMessage("user", input));
+            }
             while (out.size() > 2) {
                 int total = estimateTokens(system) + estimateTokens(input);
                 for (int i = 1; i < out.size() - 1; i++) {
@@ -785,14 +806,18 @@ public class ModelServlet extends HttpServlet {
     }
 
     private ChatResult respond(String input, java.util.List<FileRef> generatedFiles, String chatId) {
+        return respond(input, generatedFiles, chatId, "");
+    }
+
+    private ChatResult respond(String input, java.util.List<FileRef> generatedFiles, String chatId, String imageId) {
         stats.recordStart();
         long t0 = System.nanoTime();
-        if (input == null || input.trim().isEmpty()) {
+        if ((input == null || input.trim().isEmpty()) && (imageId == null || imageId.isBlank())) {
             return new ChatResult("Please type something first.", false);
         }
         try {
             List<String> urls = new ArrayList<>();
-            for (String u : findUrls(input)) {
+            for (String u : findUrls(input == null ? "" : input)) {
                 try {
                     ensureFetched(u);
                     urls.add(u);
@@ -800,13 +825,26 @@ public class ModelServlet extends HttpServlet {
                     return new ChatResult("Couldn't fetch " + u + ": " + e.getMessage(), false);
                 }
             }
-            List<Chunk> ctx = selectContext(input, urls);
-            davejones74.campanionai.retrieval.LiveContext lc = liveContext(input);
+            List<Chunk> ctx = selectContext(input == null ? "" : input, urls);
+            davejones74.campanionai.retrieval.LiveContext lc = liveContext(input == null ? "" : input);
             String live = lc.promptBlock();
             String system = systemPrompt(ctx, live);
-            List<LlmMessage> messages = buildChatMessages(chatStoreRef.get(), history, system, input, chatId, historyTokens, maxHistoryMessages);
+            List<LlmMessage> messages = buildChatMessages(chatStoreRef.get(), history, system, input == null ? "" : input, chatId, historyTokens, maxHistoryMessages);
+            String imageAnalysis = null;
+            if (imageId != null && !imageId.isBlank()) {
+                try {
+                    imageAnalysis = runVision(chatId, imageId, input == null ? "" : input);
+                } catch (LlmException visionFailure) {
+                    LOG.warn("[VISION] failed: {}", visionFailure.getMessage());
+                    return new ChatResult("Image analysis failed: " + visionFailure.getMessage(),
+                            false, List.of(), List.of(), ContextUsage.of(0, 1), null);
+                }
+                messages.set(messages.size() - 1,
+                        new LlmMessage("user", augmentQuestionWithAnalysis(input == null ? "" : input, imageAnalysis)));
+                LOG.info("[VISION] total image+request durationMs={}", (System.nanoTime() - t0) / 1_000_000L);
+            }
             ContextUsage cu = computeContextUsage(system, messages.subList(1, Math.max(0, messages.size() - 1)),
-                    ctx, live, input);
+                    ctx, live, input == null ? "" : input);
             List<Source> sources = collectSources(urls, lc);
             long historySentNonStream = 0;
             for (int i = 1; i < messages.size() - 1; i++) {
@@ -864,10 +902,12 @@ return new ChatResult("I couldn't reach the language model right now: " + e.getM
         String input;
         PrintWriter out;
         String chatId = "";
+        String imageId = "";
         try {
             JsonNode body = json.readTree(req.getInputStream());
             input = body.path("message").asText("");
             chatId = body.path("chatId").asText("");
+            imageId = body.path("imageId").asText("");
             resp.setContentType("text/event-stream; charset=UTF-8");
             resp.setHeader("Cache-Control", "no-cache");
             resp.setHeader("X-Accel-Buffering", "no");
@@ -878,7 +918,7 @@ return new ChatResult("I couldn't reach the language model right now: " + e.getM
         }
         ScheduledFuture<?> heartbeatToCancel = null;
         try {
-            if (input.trim().isEmpty()) {
+            if (input.trim().isEmpty() && imageId.isBlank()) {
                 writeEvent(out, Map.of("error", "Please type something first."));
                 writeDone(out, false);
                 return;
@@ -972,6 +1012,42 @@ return new ChatResult("I couldn't reach the language model right now: " + e.getM
             try { sse.event(java.util.Map.of("metadata", java.util.Map.of("contextUsage", java.util.Map.of(
                     "used", cu.used(), "limit", cu.limit(), "percentage", cu.percentage(),
                     "system", cu.system(), "history", cu.history(), "knowledge", cu.knowledge(), "live", cu.live(), "input", cu.input())))); } catch (IOException e) { throw new StreamAbort(e); }
+
+            // Persist the user message + image reference immediately. It remains
+            // even if vision or the main model subsequently fails.
+            if (chatId != null && !chatId.isBlank() && chatStoreRef.get() != null) {
+                try {
+                    ChatMessage early = new ChatMessage("user", input);
+                    if (!imageId.isBlank()) {
+                        Path img = imagePath(chatId, imageId);
+                        if (img != null) {
+                            String ext = img.getFileName().toString().toLowerCase(Locale.ROOT);
+                            String mime = ext.endsWith(".png") ? "image/png" : ext.endsWith(".webp") ? "image/webp" : "image/jpeg";
+                            early = early.withImage(new ImageRef(imageId, img.getFileName().toString(), mime,
+                                    "/api/images/" + chatDirName(chatId) + "/" + img.getFileName()));
+                        }
+                    }
+                    chatStoreRef.get().append(chatId, early);
+                } catch (IOException persistErr) {
+                    LOG.debug("Chat persist failed: {}", persistErr.getMessage());
+                }
+            }
+
+            if (!imageId.isBlank()) {
+                try { sse.event(Map.of("status", "Analysing image…")); } catch (IOException e) { throw new StreamAbort(e); }
+                String analysis;
+                try {
+                    analysis = runVision(chatId, imageId, input);
+                } catch (LlmException visionFailure) {
+                    LOG.warn("[VISION] failed: {}", visionFailure.getMessage());
+                    try { sse.event(Map.of("error", "Image analysis failed: " + visionFailure.getMessage())); } catch (IOException e) { throw new StreamAbort(e); }
+                    sse.done(false, false, false);
+                    return;
+                }
+                messages.set(messages.size() - 1,
+                        new LlmMessage("user", augmentQuestionWithAnalysis(input, analysis)));
+                LOG.info("[VISION] total image-response durationMs={}", (System.nanoTime() - t0) / 1_000_000L);
+            }
 
             java.util.List<FileRef> generatedFiles = new java.util.ArrayList<>();
             java.util.List<LlmMessage> streamMessages = planFiles(messages, generatedFiles);
@@ -1084,7 +1160,6 @@ return new ChatResult("I couldn't reach the language model right now: " + e.getM
             try {
                 davejones74.campanionai.chat.ChatStore csPersist = chatStoreRef.get();
                 if (csPersist != null && chatId != null && !chatId.isBlank()) {
-                    csPersist.append(chatId, new ChatMessage("user", input));
                     csPersist.append(chatId, new ChatMessage("assistant", reply).withSources(sources).withFiles(generatedFiles));
                     davejones74.campanionai.chat.Chat c = csPersist.get(chatId);
                     if (c != null && "New chat".equals(c.title()) && !input.isBlank()) {
@@ -1293,6 +1368,169 @@ return new ChatResult("I couldn't reach the language model right now: " + e.getM
         }
     }
 
+    // ---- images --------------------------------------------------------
+
+    private static final long MAX_IMAGE_BYTES = 10L * 1024 * 1024;
+
+    private static final Map<String, String> IMAGE_EXT = Map.of(
+            "image/jpeg", ".jpg",
+            "image/png", ".png",
+            "image/webp", ".webp");
+
+    /** Sniffs magic bytes rather than trusting the client Content-Type. */
+    private static String sniffImageMime(byte[] head) {
+        if (head.length >= 3 && (head[0] & 0xFF) == 0xFF && (head[1] & 0xFF) == 0xD8
+                && (head[2] & 0xFF) == 0xFF) {
+            return "image/jpeg";
+        }
+        if (head.length >= 8 && (head[0] & 0xFF) == 0x89 && head[1] == 'P' && head[2] == 'N'
+                && head[3] == 'G') {
+            return "image/png";
+        }
+        if (head.length >= 12 && head[0] == 'R' && head[1] == 'I' && head[2] == 'F'
+                && head[3] == 'F' && head[8] == 'W' && head[9] == 'E' && head[10] == 'B'
+                && head[11] == 'P') {
+            return "image/webp";
+        }
+        return null;
+    }
+
+    private String chatDirName(String chatId) {
+        return chatId == null || chatId.isBlank() ? "default" : chatId;
+    }
+
+    private Path imagePath(String chatId, String imageId) throws IOException {
+        Path dir = dataDir.resolve("images").resolve(chatDirName(chatId));
+        for (String ext : IMAGE_EXT.values()) {
+            Path candidate = dir.resolve(imageId + ext);
+            if (Files.exists(candidate)) {
+                return candidate;
+            }
+        }
+        return null;
+    }
+
+    private Map<String, Object> saveImage(String chatId, Part part) throws IOException {
+        if (part == null || part.getSize() == 0) {
+            throw new IllegalArgumentException("No image provided.");
+        }
+        if (part.getSize() > MAX_IMAGE_BYTES) {
+            throw new IllegalArgumentException("Image is too large (maximum 10 MB).");
+        }
+        byte[] bytes;
+        try (InputStream in = part.getInputStream()) {
+            if (part.getSize() > Integer.MAX_VALUE) {
+                throw new IllegalArgumentException("Image is too large (maximum 10 MB).");
+            }
+            bytes = in.readAllBytes();
+        }
+        if (bytes.length > MAX_IMAGE_BYTES) {
+            throw new IllegalArgumentException("Image is too large (maximum 10 MB).");
+        }
+        String mime = sniffImageMime(bytes);
+        if (mime == null) {
+            throw new IllegalArgumentException("Unsupported or malformed image (JPEG, PNG and WebP only).");
+        }
+        // Strict decode validation is practical for JPEG/PNG via the JDK's ImageIO.
+        // The JDK has no built-in WebP reader, so WebP is validated by its magic bytes
+        // alone; the vision model itself is the final arbiter of whether it decodes.
+        if (!mime.equals("image/webp")) {
+            try {
+                if (javax.imageio.ImageIO.read(new java.io.ByteArrayInputStream(bytes)) == null) {
+                    throw new IllegalArgumentException("Malformed image data.");
+                }
+            } catch (IllegalArgumentException e) {
+                throw e;
+            } catch (Exception e) {
+                throw new IllegalArgumentException("Malformed image data.");
+            }
+        }
+        String imageId = UUID.randomUUID().toString();
+        Path dir = dataDir.resolve("images").resolve(chatDirName(chatId));
+        Files.createDirectories(dir);
+        Path target = dir.resolve(imageId + IMAGE_EXT.get(mime));
+        Files.write(target, bytes);
+        String originalName = part.getSubmittedFileName() == null ? "image"
+                : Path.of(part.getSubmittedFileName()).getFileName().toString();
+        LOG.info("[IMAGE] stored {} ({} bytes, {}, chatId={})", target.getFileName(), bytes.length, mime, chatDirName(chatId));
+        Map<String, Object> out = new java.util.LinkedHashMap<>();
+        out.put("id", imageId);
+        out.put("filename", originalName);
+        out.put("mimeType", mime);
+        out.put("url", "/api/images/" + chatDirName(chatId) + "/" + imageId + IMAGE_EXT.get(mime));
+        return out;
+    }
+
+    private static final String VISION_SYSTEM_PROMPT = """
+            You are the visual perception component of CompanionAI.
+
+            Analyse the supplied image and produce concise, useful observations for another language model.
+
+            Identify, where visible:
+            - objects
+            - people
+            - locations or scenes
+            - readable text
+            - signs
+            - labels
+            - numbers
+            - colours
+            - notable visual details
+            - likely relationships between visible objects
+
+            Prioritise observations that could help answer the user's question.
+
+            Do not invent details that cannot reasonably be seen.
+
+            Clearly distinguish visible facts from uncertain interpretations.
+
+            Do not attempt to answer the user's broader question unless doing so is necessary to describe what is visible.
+
+            Be concise.""";
+
+    private String runVision(String chatId, String imageId, String question) throws IOException, LlmException {
+        if (vision == null || !vision.capabilities().has(LlmCapability.VISION)) {
+            throw new LlmException("The configured vision provider does not support image input.");
+        }
+        Path file = imagePath(chatId, imageId);
+        if (file == null) {
+            throw new LlmException("Image not found.");
+        }
+        byte[] bytes = Files.readAllBytes(file);
+        String ext = file.getFileName().toString().toLowerCase(Locale.ROOT);
+        String mime = ext.endsWith(".png") ? "image/png" : ext.endsWith(".webp") ? "image/webp" : "image/jpeg";
+        String userText = "User question:\n\n\"" + question + "\"\n\n"
+                + "Analyse the image specifically for information useful to answering this question.";
+        java.util.List<LlmMessage> messages = java.util.List.of(
+                new LlmMessage("system", VISION_SYSTEM_PROMPT),
+                LlmMessage.withImage("user", userText, new ImagePart(mime, bytes)));
+        long start = System.nanoTime();
+        LOG.info("[VISION] started model={} baseUrl={}", vision.model(), vision.baseUrl());
+        String analysis;
+        try {
+            analysis = vision.chat(messages);
+        } catch (LlmException e) {
+            LOG.warn("[VISION] failed after {} ms: {}", (System.nanoTime() - start) / 1_000_000L,
+                    String.valueOf(e.getMessage()));
+            throw e;
+        }
+        LOG.info("[VISION] completed in {} ms", (System.nanoTime() - start) / 1_000_000L);
+        try {
+            Path sidecar = file.resolveSibling(imageId + ".analysis.txt");
+            Files.writeString(sidecar, analysis, StandardCharsets.UTF_8);
+        } catch (Exception ignored) {
+        }
+        return analysis;
+    }
+
+    private String augmentQuestionWithAnalysis(String question, String analysis) {
+        return question + "\n\nThe following image analysis was generated by another AI model.\n\n"
+                + "Treat it as visual evidence, not guaranteed fact.\n\n"
+                + "Use it to help answer the user's question.\n\n"
+                + "If the observations are uncertain or ambiguous, preserve that uncertainty rather than presenting them as confirmed facts.\n\n"
+                + "Image analysis:\n" + analysis;
+    }
+
     @Override
     protected void doGet(HttpServletRequest req, HttpServletResponse resp) throws IOException {
         String path = req.getRequestURI();
@@ -1317,6 +1555,33 @@ return new ChatResult("I couldn't reach the language model right now: " + e.getM
             Chat c = cs.get(id);
             if (c == null) { resp.sendError(404); return; }
             resp.getWriter().write(json.writeValueAsString(java.util.Map.of("chat", c, "messages", cs.loadMessages(id))));
+            return;
+        }
+        if (path.contains("/api/images/")) {
+            String rest = path.substring(path.indexOf("/api/images/") + "/api/images/".length());
+            int slash = rest.indexOf('/');
+            if (slash <= 0 || slash == rest.length() - 1) {
+                resp.sendError(404);
+                return;
+            }
+            String chatPart = rest.substring(0, slash);
+            String name = rest.substring(slash + 1);
+            if (name.contains("..") || chatPart.contains("..") || name.endsWith(".analysis.txt")
+                    || (!name.endsWith(".jpg") && !name.endsWith(".png") && !name.endsWith(".webp"))) {
+                resp.sendError(404);
+                return;
+            }
+            Path imagesRoot = dataDir.resolve("images");
+            Path targetFile = imagesRoot.resolve(chatPart).resolve(name).normalize();
+            if (!targetFile.startsWith(imagesRoot) || !Files.exists(targetFile) || !Files.isRegularFile(targetFile)) {
+                resp.sendError(404);
+                return;
+            }
+            String lower = name.toLowerCase(Locale.ROOT);
+            String ct = lower.endsWith(".png") ? "image/png" : lower.endsWith(".webp") ? "image/webp" : "image/jpeg";
+            resp.setContentType(ct);
+            resp.setHeader("Cache-Control", "no-cache");
+            Files.copy(targetFile, resp.getOutputStream());
             return;
         }
         if (path.contains("/api/files/")) {
@@ -1423,17 +1688,37 @@ return new ChatResult("I couldn't reach the language model right now: " + e.getM
                 JsonNode body = json.readTree(req.getInputStream());
                 String msg = body.path("message").asText("");
                 String chatId = body.path("chatId").asText("");
+                String imageId = body.path("imageId").asText("");
+                // Persist the user message (and image reference) as soon as the request is
+                // accepted. It stays even if vision or the main model later fails.
+                davejones74.campanionai.chat.ChatStore csEarly = chatStoreRef.get();
+                if (csEarly != null && chatId != null && !chatId.isBlank()) {
+                    try {
+                        ChatMessage early = new ChatMessage("user", msg);
+                        if (!imageId.isBlank()) {
+                            Path img = imagePath(chatId, imageId);
+                            if (img != null) {
+                                String ext = img.getFileName().toString().toLowerCase(Locale.ROOT);
+                                String mime = ext.endsWith(".png") ? "image/png" : ext.endsWith(".webp") ? "image/webp" : "image/jpeg";
+                                early = early.withImage(new ImageRef(imageId,
+                                        img.getFileName().toString(), mime,
+                                        "/api/images/" + chatDirName(chatId) + "/" + img.getFileName()));
+                            }
+                        }
+                        csEarly.append(chatId, early);
+                    } catch (IOException ignored) {
+                    }
+                }
                 // One request assembles the context once. Computing it here and again inside
                 // respond() ran every live retrieval twice, which doubled the Tavily cost and
                 // latency of every non-streaming chat, and the outer copy was computed before the
                 // fetched URL had been added to the knowledge base, so it could not match it.
                 java.util.List<FileRef> files = new java.util.ArrayList<>();
-                ChatResult result = respond(msg, files, chatId);
+                ChatResult result = respond(msg, files, chatId, imageId);
                 java.util.List<Source> sources = result.sources();
                 try {
                     davejones74.campanionai.chat.ChatStore cs = chatStoreRef.get();
                     if (cs != null && chatId != null && !chatId.isBlank()) {
-                        cs.append(chatId, new ChatMessage("user", msg));
                         cs.append(chatId, new ChatMessage("assistant", result.reply()).withSources(sources).withFiles(files));
                         davejones74.campanionai.chat.Chat c = cs.get(chatId);
                         if (c != null && "New chat".equals(c.title()) && !msg.isBlank()) {
@@ -1456,6 +1741,21 @@ return new ChatResult("I couldn't reach the language model right now: " + e.getM
                             "notice", result.cloud().notice()));
                 }
                 resp.getWriter().write(json.writeValueAsString(respMap));
+            } else if (path.endsWith("/api/chat/image")) {
+                try {
+                    Part img = req.getPart("image");
+                    String chatId = req.getParameter("chatId");
+                    if ((chatId == null || chatId.isBlank()) && req.getPart("chatId") != null) {
+                        try (InputStream in = req.getPart("chatId").getInputStream()) {
+                            chatId = new String(in.readAllBytes(), StandardCharsets.UTF_8).trim();
+                        }
+                    }
+                    Map<String, Object> saved = saveImage(chatId, img);
+                    resp.getWriter().write(json.writeValueAsString(saved));
+                } catch (IllegalArgumentException bad) {
+                    resp.setStatus(400);
+                    resp.getWriter().write(json.writeValueAsString(Map.of("ok", false, "message", bad.getMessage())));
+                }
             } else if (path.endsWith("/upload")) {
                 Part doc = req.getPart("doc");
                 String filename = "unknown";
@@ -1975,6 +2275,13 @@ details.stats .stat-grid b { color: var(--text); font-weight: 600; }
       <input type="file" id="file-input" accept=".txt,.docx,.pdf">
       <span id="file-name"></span>
       <button class="btn" id="upload-btn" style="padding:6px 14px;font-size:13.5px;">Upload</button>
+      <label class="file-label" for="image-input">Attach image</label>
+      <input type="file" id="image-input" accept="image/jpeg,image/png,image/webp" style="display:none;">
+      <span id="image-pick-name"></span>
+    </div>
+    <div id="image-preview" style="display:none;align-items:center;gap:8px;">
+      <img id="image-thumb" style="max-height:60px;border-radius:8px;border:1px solid var(--border);">
+      <button class="btn" id="image-remove" style="padding:4px 12px;font-size:12.5px;background:#b23b3b;">Remove image</button>
     </div>
   </div>
 </footer>
@@ -1992,6 +2299,29 @@ const fileInput = document.getElementById('file-input');
 const uploadBtn = document.getElementById('upload-btn');
 const fileName = document.getElementById('file-name');
 const docCount = document.getElementById('doc-count');
+const imageInput = document.getElementById('image-input');
+const imagePreview = document.getElementById('image-preview');
+const imageThumb = document.getElementById('image-thumb');
+const imagePickName = document.getElementById('image-pick-name');
+let pendingImage = null;
+let pendingImageUrl = null;
+function clearPendingImage() {
+  pendingImage = null;
+  if (pendingImageUrl) { URL.revokeObjectURL(pendingImageUrl); pendingImageUrl = null; }
+  imageInput.value = '';
+  imagePreview.style.display = 'none';
+  imagePickName.textContent = '';
+}
+imageInput.addEventListener('change', () => {
+  const f = imageInput.files && imageInput.files[0];
+  if (!f) return;
+  pendingImage = f;
+  pendingImageUrl = URL.createObjectURL(f);
+  imageThumb.src = pendingImageUrl;
+  imagePreview.style.display = 'flex';
+  imagePickName.textContent = f.name;
+});
+document.getElementById('image-remove').addEventListener('click', clearPendingImage);
 
 function tone(ctx, freq, start, dur, vol) {
   const o = ctx.createOscillator();
@@ -2337,18 +2667,31 @@ function mdRender(src) {
     try { document.execCommand('copy'); } catch (e) {}
     ta.remove();
   }
-  function addMsg(role, text, offline) {
+  function addMsg(role, text, offline, imageUrl) {
     if (emptyHint) { emptyHint.remove(); emptyHint = null; }
     const wrap = document.createElement('div');
     wrap.className = 'msg ' + role;
     const inner = document.createElement('div');
     inner.className = 'bubble';
+    if (imageUrl) {
+      const img = document.createElement('img');
+      img.src = imageUrl;
+      img.style.maxWidth = '240px';
+      img.style.borderRadius = '8px';
+      img.style.display = 'block';
+      img.style.marginBottom = text ? '6px' : '0';
+      inner.appendChild(img);
+    }
     if (role === 'assistant') {
-      inner.innerHTML = mdRender(text);
+      const div = document.createElement('div');
+      div.innerHTML = mdRender(text);
+      inner.appendChild(div);
       addCopyButton(inner, text);
       addCodeCopyButtons(inner);
-    } else {
-      inner.textContent = text;
+    } else if (text) {
+      const div = document.createElement('div');
+      div.textContent = text;
+      inner.appendChild(div);
     }
   wrap.appendChild(inner);
   if (offline) {
@@ -2448,7 +2791,7 @@ function selectChat(id) {
     const log = document.getElementById('chat-log');
     log.innerHTML = '';
     (data.messages || []).forEach(m => {
-      if (m.role === 'user') addMsg('user', m.content);
+      if (m.role === 'user') addMsg('user', m.content, false, m.image ? m.image.url : null);
       else {
         addMsg('assistant', m.content);
         (m.sources || []).forEach(appendSource);
@@ -2508,7 +2851,7 @@ if (storedCollapsed != null) {
 loadChats();
 async function send() {
   const text = input.value.trim();
-  if (!text || sendBtn.disabled) return;
+  if ((!text && !pendingImage) || sendBtn.disabled) return;
   if (!currentChatId) {
     try {
       const c = await (await fetch('/api/chats', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: 'New chat' }) })).json();
@@ -2517,7 +2860,25 @@ async function send() {
     } catch (e) { /* offline; chatId stays blank */ }
   }
   resetMeta();
-  addMsg('user', text);
+  let uploadedImage = null;
+  if (pendingImage) {
+    try {
+      const fd = new FormData();
+      fd.append('image', pendingImage);
+      fd.append('chatId', currentChatId || '');
+      const res = await fetch('/api/chat/image', { method: 'POST', body: fd });
+      const d = await res.json();
+      if (!res.ok || d.ok === false) throw new Error(d.message || ('HTTP ' + res.status));
+      uploadedImage = d;
+    } catch (e) {
+      addMsg('assistant', 'Sorry, something went wrong: image upload failed: ' + e.message);
+      clearPendingImage();
+      sendBtn.disabled = false;
+      return;
+    }
+  }
+  addMsg('user', text, false, uploadedImage ? uploadedImage.url : (pendingImageUrl));
+  clearPendingImage();
   let thinkEl = document.createElement('div');
   thinkEl.className = 'msg assistant thinking';
   thinkEl.innerHTML = '<span>thinking</span><span class="dots"><span></span><span></span><span></span></span>';
@@ -2538,7 +2899,7 @@ async function send() {
     const res = await fetch('/api/chat/stream', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: text, chatId: currentChatId })
+      body: JSON.stringify({ message: text, chatId: currentChatId, imageId: uploadedImage ? uploadedImage.id : '' })
     });
     if (!res.ok) throw new Error('HTTP ' + res.status);
     if (!res.body) throw new Error('Streaming is not supported in this browser.');

@@ -51,6 +51,25 @@ public final class LlmProviderFactory {
     }
 
     public static LlmProvider fromSystemProperties() {
+        return fromSystemProperties(ModelRole.MAIN);
+    }
+
+    /**
+     * Resolves the provider for a model role. MAIN keeps its existing keys
+     * ({@code companionai.llm.*} / {@code LLM_*}). VISION inherits the MAIN
+     * provider, base URL and temperature unless explicitly overridden with
+     * {@code companionai.llm.vision.provider} ({@code LLM_VISION_PROVIDER}),
+     * {@code companionai.llm.vision.model} ({@code LLM_VISION_MODEL}) and
+     * {@code companionai.llm.vision.baseUrl} ({@code LLM_VISION_BASE_URL}).
+     */
+    public static LlmProvider fromSystemProperties(ModelRole role) {
+        if (role == ModelRole.VISION) {
+            return visionProvider();
+        }
+        return mainProvider();
+    }
+
+    private static LlmProvider mainProvider() {
         String providerName = orDefault(lookup(PROVIDER_KEYS, "LLM_PROVIDER"), DEFAULT_PROVIDER);
         String model = orDefault(lookup(MODEL_KEYS, "LLM_MODEL"), DEFAULT_MODEL);
         double temperature = decimal(lookup(TEMPERATURE_KEYS, "LLM_TEMPERATURE"), DEFAULT_TEMPERATURE);
@@ -67,6 +86,44 @@ public final class LlmProviderFactory {
                     provider.providerName(), NUM_CTX_KEYS[1]);
         }
         warnIfBaseUrlIsUnverified(providerName, configuredBaseUrl, provider);
+        return provider;
+    }
+
+    private static LlmProvider visionProvider() {
+        String providerName = lookup(
+                new String[]{"companionai.llm.vision.provider", "campanionai.llm.vision.provider"},
+                "LLM_VISION_PROVIDER");
+        if (isBlank(providerName)) {
+            providerName = orDefault(lookup(PROVIDER_KEYS, "LLM_PROVIDER"), DEFAULT_PROVIDER);
+        }
+        String model = lookup(
+                new String[]{"companionai.llm.vision.model", "campanionai.llm.vision.model"},
+                "LLM_VISION_MODEL");
+        if (isBlank(model)) {
+            model = "qwen3vl-flash:4b";
+        }
+        double temperature;
+        String configuredTemperature = lookup(
+                new String[]{"companionai.llm.vision.temperature", "campanionai.llm.vision.temperature"},
+                "LLM_VISION_TEMPERATURE");
+        if (!isBlank(configuredTemperature)) {
+            temperature = decimal(configuredTemperature, DEFAULT_TEMPERATURE);
+        } else {
+            temperature = decimal(lookup(TEMPERATURE_KEYS, "LLM_TEMPERATURE"), DEFAULT_TEMPERATURE);
+        }
+        boolean think = bool(lookup(THINK_KEYS, "LLM_THINK"), false);
+        int maxTokens = positiveInteger(lookup(MAX_TOKENS_KEYS, "LLM_MAX_TOKENS"), DEFAULT_MAX_TOKENS);
+        String configuredBaseUrl = lookup(
+                new String[]{"companionai.llm.vision.baseUrl", "campanionai.llm.vision.baseUrl"},
+                "LLM_VISION_BASE_URL");
+        if (isBlank(configuredBaseUrl)) {
+            configuredBaseUrl = explicitBaseUrl(providerName);
+        }
+        String baseUrl = resolveBaseUrl(providerName, configuredBaseUrl);
+        LlmProvider provider = create(providerName, baseUrl, model, temperature, null, think, maxTokens);
+        warnIfBaseUrlIsUnverified(providerName, configuredBaseUrl, provider);
+        LOG.info("Vision model role configured: provider={} model={} baseUrl={}",
+                provider.providerName(), provider.model(), provider.baseUrl());
         return provider;
     }
 

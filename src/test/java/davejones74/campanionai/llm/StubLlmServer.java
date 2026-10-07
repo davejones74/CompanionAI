@@ -33,6 +33,10 @@ public final class StubLlmServer implements AutoCloseable {
     private final AtomicReference<String> lastBody = new AtomicReference<>("");
     private final AtomicReference<String> lastPath = new AtomicReference<>("");
     private final AtomicInteger requestCount = new AtomicInteger();
+    private final java.util.List<String> bodies =
+            java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+    private final java.util.concurrent.ConcurrentLinkedQueue<Reply> sequence =
+            new java.util.concurrent.ConcurrentLinkedQueue<>();
 
     private volatile Reply chat = Reply.sse("{\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}", "[DONE]");
     private volatile Reply chatStream = null;
@@ -79,6 +83,20 @@ public final class StubLlmServer implements AutoCloseable {
         chat = Reply.json(body);
     }
 
+    /** Replies with these JSON bodies in request order, then falls back to {@code chat}. */
+    public void chatSequence(String... bodies) {
+        for (String body : bodies) {
+            sequence.add(Reply.json(body));
+        }
+    }
+
+    /**Every request body captured so far, in arrival order. */
+    public java.util.List<String> allBodies() {
+        synchronized (bodies) {
+            return new java.util.ArrayList<>(bodies);
+        }
+    }
+
     /** Returns {@code status} with {@code body}, for error-path tests. */
     public void chatFailure(int status, String body) {
         chat = Reply.failure(status, body);
@@ -112,10 +130,13 @@ public final class StubLlmServer implements AutoCloseable {
     private void handle(HttpExchange exchange) throws IOException {
         requestCount.incrementAndGet();
         lastBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+        bodies.add(lastBody.get());
 
         String path = exchange.getRequestURI().getPath();
         lastPath.set(path);
-        Reply reply = path.endsWith("/models") ? models
+        Reply queued = sequence.poll();
+        Reply reply = queued != null ? queued
+                : path.endsWith("/models") ? models
                 : chatStream != null && lastBody.get().contains("\"stream\":true") ? chatStream
                 : chat;
 

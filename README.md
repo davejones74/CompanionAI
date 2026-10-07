@@ -152,6 +152,15 @@ order system property → environment variable → default.
 | `companionai.llm.temperature` | `LLM_TEMPERATURE` | `0.7`          | Sampling temperature                                               |
 | `companionai.llm.numCtx`    | `LLM_NUM_CTX`     | *(unset)*        | Context window. Ollama only; ignored with a warning elsewhere      |
 | `companionai.llm.think`     | `LLM_THINK`       | `false`          | `fastflowlm` only; enables reasoning output                        |
+| `companionai.llm.vision.provider` | `LLM_VISION_PROVIDER` | inherits MAIN provider | Provider serving the VISION role                     |
+| `companionai.llm.vision.model` | `LLM_VISION_MODEL`    | `qwen3vl-flash:4b` | Model identifier for image analysis                        |
+| `companionai.llm.vision.baseUrl` | `LLM_VISION_BASE_URL` | inherits MAIN base URL | Runtime root URL for the vision provider                |
+| `companionai.llm.vision.temperature` | `LLM_VISION_TEMPERATURE` | inherits MAIN temperature | Sampling temperature for the vision request        |
+
+Two model roles exist: `MAIN` (the conversational model, configured by the
+`companionai.llm.*` keys above) and `VISION` (the dedicated image-analysis
+model, a perception layer whose observations are supplied to MAIN). The main
+model stays text-only in V1; the image itself is never sent to it.
 
 > The default FastFlowLM base URL (`http://127.0.0.1:52625`) is the port
 > `flm port` reports, and it has been confirmed working against FastFlowLM

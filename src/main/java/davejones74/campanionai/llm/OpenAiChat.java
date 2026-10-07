@@ -47,8 +47,23 @@ final class OpenAiChat {
         ArrayNode array = mapper.createArrayNode();
         for (LlmMessage message : messages) {
             ObjectNode m = mapper.createObjectNode()
-                    .put("role", message.role())
-                    .put("content", message.content());
+                    .put("role", message.role());
+            if (message.hasImages()) {
+                // OpenAI-style multimodal content parts: text plus image_url data URLs.
+                ArrayNode parts = mapper.createArrayNode();
+                parts.add(mapper.createObjectNode()
+                        .put("type", "text")
+                        .put("text", message.content()));
+                for (ImagePart image : message.images()) {
+                    parts.add(mapper.createObjectNode()
+                            .put("type", "image_url")
+                            .set("image_url", mapper.createObjectNode()
+                                    .put("url", image.dataUrl())));
+                }
+                m.set("content", parts);
+            } else {
+                m.put("content", message.content());
+            }
             if (message.toolCalls() != null) {
                 m.set("tool_calls", message.toolCalls());
             }
